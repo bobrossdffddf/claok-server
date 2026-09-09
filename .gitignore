@@ -5,13 +5,19 @@ dist/
 _to_delete/
 *.log
 
+# My scratch files, not part of the project
+.cmd.sh
+.out.txt
+.work.sh
+
 Cloak.xcodeproj/
 Packages/*/.build/
 Packages/*/build/
-Bridge/*/target/
-Desktop/target/
+Packages/*/.swiftpm/
+**/target/
 Desktop/payload/
 
+# Secrets. Never commit these.
 Scripts/team.env
 Scripts/server.env
 Scripts/*.env
@@ -20,3 +26,7 @@ Server/data/
 **/*.p8
 **/*.p12
 **/*.mobileprovision
+
+# Apple's developer disk image. It is Apple's, not ours, and it belongs on
+# your server rather than in a code repository.
+ServerPayload/DeveloperImage/
