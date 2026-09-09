@@ -1,0 +1,4 @@
+module CloakBridge {
+    header "cloak_bridge.h"
+    export *
+}

@@ -1,0 +1,87 @@
+name: Cloak Installer
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: Desktop
+
+      - name: Build
+        working-directory: Desktop
+        env:
+          RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/src
+        run: cargo build --release
+
+      - name: Stage
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/CloakInstaller | Out-Null
+          Copy-Item Desktop/target/release/cloak-installer.exe dist/CloakInstaller/CloakInstaller.exe
+          if (Test-Path Desktop/payload/Cloak.ipa) {
+            Copy-Item Desktop/payload/Cloak.ipa dist/CloakInstaller/Cloak.ipa
+          }
+          Copy-Item Desktop/README.md dist/CloakInstaller/README.txt
+          Compress-Archive -Path dist/CloakInstaller/* -DestinationPath dist/CloakInstaller-windows.zip
+
+      - name: Build the setup program
+        shell: pwsh
+        run: |
+          choco install nsis --no-progress -y
+          & "$env:ProgramFiles(x86)\NSIS\makensis.exe" Desktop\installer.nsi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CloakInstaller-windows
+          path: |
+            dist/CloakInstaller-Setup.exe
+            dist/CloakInstaller-windows.zip
+
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: Desktop
+
+      - name: Build
+        working-directory: Desktop
+        env:
+          RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/src
+        run: cargo build --release
+
+      - name: Package
+        run: |
+          APP="dist/Cloak Installer.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp Desktop/target/release/cloak-installer "$APP/Contents/MacOS/CloakInstaller"
+          [ -f Desktop/payload/Cloak.ipa ] && cp Desktop/payload/Cloak.ipa "$APP/Contents/Resources/Cloak.ipa" || true
+          cp Desktop/Info.plist "$APP/Contents/Info.plist"
+          codesign --force --deep --sign - "$APP"
+          bash Scripts/build-dmg.sh
+          cd dist && zip -qry CloakInstaller-macos.zip "Cloak Installer.app"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CloakInstaller-macos
+          path: |
+            dist/CloakInstaller-macos.dmg
+            dist/CloakInstaller-macos.zip

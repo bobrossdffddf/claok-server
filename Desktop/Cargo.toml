@@ -1,0 +1,39 @@
+[package]
+name = "cloak-installer"
+version = "1.0.0"
+edition = "2021"
+description = "Puts Cloak on your iPhone and keeps it there."
+
+[[bin]]
+name = "cloak-installer"
+path = "src/main.rs"
+
+[dependencies]
+eframe = "0.31"
+egui = "0.31"
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "fs", "process"] }
+idevice = { version = "0.1.65", features = [
+    "usbmuxd", "amfi", "installation_proxy", "afc", "misagent", "heartbeat", "house_arrest", "ring",
+] }
+isideload = { version = "0.3", default-features = false, features = ["install", "tokio-mt"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std"] }
+# isideload's storage trait returns this error type, so implementing it needs the crate.
+rootcause = "0.12"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+plist = "1"
+directories = "5"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+open = "5"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+strip = true
+

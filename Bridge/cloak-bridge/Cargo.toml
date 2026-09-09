@@ -1,0 +1,39 @@
+[package]
+name = "cloak-bridge"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "cloak_bridge"
+crate-type = ["staticlib", "rlib"]
+
+[[bin]]
+name = "cloak-pair-cli"
+path = "src/bin/pair_cli.rs"
+
+[[bin]]
+name = "rpprobe"
+path = "src/bin/rpprobe.rs"
+
+[[bin]]
+name = "probe"
+path = "src/bin/probe.rs"
+
+[dependencies]
+idevice = { version = "0.1.65", features = [
+    "tcp",
+    "core_device_proxy",
+    "tunnel_tcp_stack",
+    "xpc",
+    "rsd",
+    "dvt",
+    "location_simulation",
+    "mobile_image_mounter",
+    "tss",
+    "usbmuxd",
+    "pair",
+    "remote_pairing",
+] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util"] }
+plist = "1"
+serde_json = "1"

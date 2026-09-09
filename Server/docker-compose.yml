@@ -1,0 +1,26 @@
+# Everything the licence server needs, in one file.
+#
+# Cloudflare's tunnel makes the outbound connection, so nothing here is
+# exposed to the internet, no ports are forwarded on your router, and the
+# certificate is Cloudflare's problem rather than yours.
+
+services:
+  cloak:
+    image: ${CLOAK_IMAGE}
+    container_name: cloak
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/data
+    # No ports section on purpose. The tunnel reaches it over the compose
+    # network, and nothing else can.
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: cloak-tunnel
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - cloak

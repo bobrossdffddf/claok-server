@@ -1,0 +1,8 @@
+/Users/wacko/.cloak-build/installer/Cloak Installer.app: replacing existing signature
+wrote /Users/wacko/Downloads/Cloak/dist/Cloak Installer.app
+-rw-r--r--@ 1 wacko  staff    18M Sep  9 16:04 /Users/wacko/Downloads/Cloak/dist/CloakInstaller-macos.dmg
+total 72240
+drwxr-xr-x@ 3 wacko  staff    96B Sep  9 16:04 Cloak Installer.app
+-rw-r--r--@ 1 wacko  staff    18M Sep  9 16:04 CloakInstaller-macos.dmg
+-rw-r--r--@ 1 wacko  staff    17M Sep  9 16:04 CloakInstaller-macos.zip
+DONE

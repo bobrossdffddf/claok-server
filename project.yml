@@ -1,0 +1,132 @@
+name: Cloak
+options:
+  bundleIdPrefix: app.cloak
+  deploymentTarget:
+    iOS: "17.0"
+    macOS: "14.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+
+packages:
+  CloakKit:
+    path: Packages/CloakKit
+
+targets:
+  Cloak:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+      - path: Shared
+    dependencies:
+      - package: CloakKit
+      - target: CloakTunnel
+        embed: true
+      - target: CloakWidgets
+        embed: true
+      - framework: Frameworks/CloakBridge.xcframework
+        embed: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.cloak.ios
+        INFOPLIST_FILE: App/Resources/Info.plist
+        CODE_SIGN_ENTITLEMENTS: App/Resources/Cloak.entitlements
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+
+  CloakFree:
+    # Same app, signed by a free Apple ID. Free accounts cannot sign a network
+    # extension, so this build carries no tunnel of its own and leans on
+    # LocalDevVPN instead. Everything else is identical.
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+      - path: Shared
+    dependencies:
+      - package: CloakKit
+      - target: CloakWidgets
+        embed: true
+      - framework: Frameworks/CloakBridge.xcframework
+        embed: false
+    settings:
+      base:
+        PRODUCT_NAME: Cloak
+        PRODUCT_BUNDLE_IDENTIFIER: app.cloak.ios
+        INFOPLIST_FILE: App/Resources/Info.plist
+        CODE_SIGN_ENTITLEMENTS: App/Resources/CloakFree.entitlements
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) CLOAK_FREE"
+
+  CloakTunnel:
+    type: app-extension
+    platform: iOS
+    sources:
+      - Tunnel
+      - path: Shared
+    dependencies:
+      - package: CloakKit
+      - framework: Frameworks/CloakBridge.xcframework
+        embed: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.cloak.ios.loopback
+        INFOPLIST_FILE: Tunnel/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Tunnel/CloakTunnel.entitlements
+
+  CloakWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+      - Widgets
+    dependencies:
+      - package: CloakKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.cloak.ios.widgets
+        INFOPLIST_FILE: Widgets/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Widgets/CloakWidgets.entitlements
+
+  CloakPair:
+    type: application
+    platform: macOS
+    sources:
+      - Helper/CloakPair
+      - path: Shared/SetupPayload.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.cloak.pair
+        INFOPLIST_FILE: Helper/CloakPair/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Helper/CloakPair/CloakPair.entitlements
+
+schemes:
+  Cloak:
+    build:
+      targets:
+        Cloak: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+  CloakFree:
+    build:
+      targets:
+        CloakFree: all
+    run:
+      config: Debug
+  CloakPair:
+    build:
+      targets:
+        CloakPair: all
+    run:
+      config: Debug

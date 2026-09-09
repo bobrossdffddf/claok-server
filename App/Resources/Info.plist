@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>$(DEVELOPMENT_LANGUAGE)</string>
+    <key>CFBundleExecutable</key>
+    <string>$(EXECUTABLE_NAME)</string>
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>$(PRODUCT_NAME)</string>
+    <key>CFBundlePackageType</key>
+    <string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
+    <key>CFBundleDisplayName</key>
+    <string>Cloak</string>
+    <key>ITSAppUsesNonExemptEncryption</key>
+    <false/>
+    <key>CFBundleShortVersionString</key>
+    <string>$(MARKETING_VERSION)</string>
+    <key>CFBundleVersion</key>
+    <string>$(CURRENT_PROJECT_VERSION)</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>app.cloak.ios</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>cloak</string>
+            </array>
+        </dict>
+    </array>
+    <key>LSApplicationQueriesSchemes</key>
+    <array>
+        <string>localdevvpn</string>
+    </array>
+    <key>UIFileSharingEnabled</key>
+    <true/>
+    <key>LSSupportsOpeningDocumentsInPlace</key>
+    <true/>
+    <key>UILaunchScreen</key>
+    <dict/>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Cloak talks to this phone's own developer services over a loopback connection. Nothing leaves the device.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_remotepairing._tcp</string>
+		<string>_remotepairing-pairable-host._tcp</string>
+        <string>_remoted._tcp</string>
+        <string>_apple-mobdev2._tcp</string>
+    </array>
+    <key>NSCameraUsageDescription</key>
+    <string>Cloak uses the camera once, to scan the pairing code shown by the helper on your computer.</string>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>Cloak reads your position so it can show you where you actually are and run the geofence guard.</string>
+    <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+    <string>Cloak reads your position in the background so the geofence guard can stop simulation if you leave the area you set.</string>
+    <key>NSMotionUsageDescription</key>
+    <string>Cloak watches for real movement so it can tell when your actual position may have changed.</string>
+    <key>NSSupportsLiveActivities</key>
+    <true/>
+    <key>NSSupportsLiveActivitiesFrequentUpdates</key>
+    <true/>
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>location</string>
+    </array>
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+    </array>
+    <key>UIApplicationSceneManifest</key>
+    <dict>
+        <key>UIApplicationSupportsMultipleScenes</key>
+        <true/>
+    </dict>
+</dict>
+</plist>

@@ -1,0 +1,5 @@
+Inter, by Rasmus Andersson. SIL Open Font License 1.1.
+https://github.com/rsms/inter
+
+Phosphor Icons, by Phosphor Icons. MIT.
+https://github.com/phosphor-icons/web
