@@ -19,6 +19,7 @@ use tokio::sync::Mutex;
 
 use crate::config::{Config, StoredPassword};
 use crate::device::{self, DeveloperMode, Phone};
+use crate::handoff;
 
 #[derive(Debug, Clone)]
 pub enum Command {
@@ -369,6 +370,37 @@ async fn install(
     }
 
     let provider = device::provider_for(udid).await?;
+
+    // The pairing record goes inside the app, before it is signed.
+    //
+    // This is what makes Cloak work on every iOS version rather than only on
+    // 27. Below that, a phone cannot pair with itself, so the record this
+    // computer already holds is the only way the app can talk to the phone's
+    // own developer services. Pushing it across afterwards over AFC is what
+    // used to happen, and iOS refused it every single time with a permission
+    // error, which left every install below iOS 27 quietly broken.
+    let ipa = match handoff::pairing_record(&provider).await {
+        Ok(record) => {
+            let bundled = std::env::temp_dir().join("Cloak-paired.ipa");
+            match handoff::bundle_pairing_record(ipa, &record, &bundled) {
+                Ok(()) => {
+                    tracing::info!("pairing record bundled into the app");
+                    bundled
+                }
+                Err(reason) => {
+                    // Not fatal on iOS 27, which can pair by itself, so carry
+                    // on rather than refusing to install at all.
+                    tracing::warn!("could not bundle the pairing record: {reason}");
+                    ipa.clone()
+                }
+            }
+        }
+        Err(reason) => {
+            tracing::warn!("no pairing record to hand over: {reason}");
+            ipa.clone()
+        }
+    };
+    let ipa = &ipa;
 
     // Signing is attempted twice at most. The first failure is very often a
     // signing certificate this computer thinks it owns and Apple has never

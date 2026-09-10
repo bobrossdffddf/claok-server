@@ -98,3 +98,122 @@ pub async fn trust_signer(
         .await
         .map_err(|e| format!("The iPhone would not trust the signature: {e}"))
 }
+
+/// Puts the pairing record inside the app itself, before it is signed.
+///
+/// The old route pushed the file over AFC once the app was on the phone, and
+/// iOS refused it with a permission error on every install. Nothing about that
+/// is recoverable from the outside: the folder either opens or it does not, and
+/// when it does not the app has no pairing record and falls back to pairing
+/// with itself, which only works on iOS 27.
+///
+/// A file placed in the bundle before signing has none of those problems. It is
+/// covered by the signature like everything else, it arrives with the app, and
+/// there is no version of iOS where it fails to be there.
+pub fn bundle_pairing_record(
+    ipa: &std::path::Path,
+    record: &[u8],
+    destination: &std::path::Path,
+) -> Result<(), String> {
+    use std::io::Write;
+
+    let source = std::fs::File::open(ipa).map_err(|e| format!("Could not open the app: {e}"))?;
+    let mut archive =
+        zip::ZipArchive::new(source).map_err(|e| format!("Could not read the app: {e}"))?;
+
+    // The bundle is Payload/<something>.app, and the name is not fixed.
+    let app_dir = archive
+        .file_names()
+        .find(|name| name.starts_with("Payload/") && name.ends_with(".app/Info.plist"))
+        .map(|name| name.trim_end_matches("Info.plist").to_string())
+        .ok_or_else(|| "That does not look like an iPhone app.".to_string())?;
+
+    let output =
+        std::fs::File::create(destination).map_err(|e| format!("Could not write the app: {e}"))?;
+    let mut writer = zip::ZipWriter::new(output);
+
+    for index in 0..archive.len() {
+        let entry = archive
+            .by_index_raw(index)
+            .map_err(|e| format!("Could not read the app: {e}"))?;
+        // Copied without recompressing: this runs on every install and there is
+        // nothing to gain by rebuilding several megabytes of it.
+        writer
+            .raw_copy_file(entry)
+            .map_err(|e| format!("Could not rebuild the app: {e}"))?;
+    }
+
+    writer
+        .start_file(
+            format!("{app_dir}{PAIRING_FILE}"),
+            zip::write::SimpleFileOptions::default(),
+        )
+        .map_err(|e| format!("Could not add the pairing record: {e}"))?;
+    writer
+        .write_all(record)
+        .map_err(|e| format!("Could not add the pairing record: {e}"))?;
+
+    writer
+        .finish()
+        .map_err(|e| format!("Could not finish the app: {e}"))?;
+
+    Ok(())
+}
+
+/// This computer's pairing record for the phone, as bytes.
+pub async fn pairing_record(provider: &dyn IdeviceProvider) -> Result<Vec<u8>, String> {
+    provider
+        .get_pairing_file()
+        .await
+        .map_err(|e| format!("Could not read this computer's pairing record: {e}"))?
+        .serialize()
+        .map_err(|e| format!("Could not package the pairing record: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Proves the record really lands next to Info.plist and that the rest of
+    /// the app survives the rebuild. This is the one step between a phone
+    /// below iOS 27 working and not working, so it is worth knowing it holds
+    /// without having a phone in hand.
+    #[test]
+    fn record_lands_in_the_bundle() {
+        let dir = std::env::temp_dir().join("cloak-handoff-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let source = dir.join("in.ipa");
+        let output = dir.join("out.ipa");
+
+        {
+            use std::io::Write;
+            let file = std::fs::File::create(&source).unwrap();
+            let mut writer = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default();
+            writer
+                .start_file("Payload/Cloak.app/Info.plist", options)
+                .unwrap();
+            writer.write_all(b"<plist/>").unwrap();
+            writer
+                .start_file("Payload/Cloak.app/Cloak", options)
+                .unwrap();
+            writer.write_all(b"binary").unwrap();
+            writer.finish().unwrap();
+        }
+
+        bundle_pairing_record(&source, b"the-record", &output).unwrap();
+
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&output).unwrap()).unwrap();
+        let names: Vec<String> = archive.file_names().map(str::to_owned).collect();
+        assert!(names.contains(&format!("Payload/Cloak.app/{PAIRING_FILE}")));
+        assert!(names.contains(&"Payload/Cloak.app/Cloak".to_string()));
+
+        use std::io::Read;
+        let mut entry = archive
+            .by_name(&format!("Payload/Cloak.app/{PAIRING_FILE}"))
+            .unwrap();
+        let mut body = Vec::new();
+        entry.read_to_end(&mut body).unwrap();
+        assert_eq!(body, b"the-record");
+    }
+}

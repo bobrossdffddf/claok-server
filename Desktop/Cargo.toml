@@ -31,6 +31,9 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 plist = "1"
+# Same version isideload builds, so the pairing record can be dropped into the
+# ipa before signing rather than pushed over AFC afterwards.
+zip = { version = "8", default-features = false, features = ["deflate"] }
 directories = "5"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }

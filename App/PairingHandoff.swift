@@ -11,6 +11,21 @@ import CloakKit
 enum PairingHandoff {
     static let fileName = "cloak-pairing.plist"
 
+    /// The copy that came inside the app.
+    ///
+    /// The installer puts it here before signing, so it arrives with the app on
+    /// every iOS version. This is the one that matters below iOS 27, where the
+    /// phone cannot pair with itself and there is no other way for it to have a
+    /// pairing record at all.
+    static var bundledURL: URL? {
+        guard let url = Bundle.main.url(forResource: "cloak-pairing", withExtension: "plist") else {
+            return nil
+        }
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
+    /// A copy dropped into Documents. The older route, kept because a file put
+    /// there by hand still works and costs nothing to look for.
     static var incomingURL: URL? {
         guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
             return nil
@@ -23,9 +38,20 @@ enum PairingHandoff {
     /// taken on.
     @discardableResult
     static func adopt(into store: PairingStore) -> Bool {
-        guard let url = incomingURL else { return false }
-        defer { try? FileManager.default.removeItem(at: url) }
+        // Documents first: a file put there deliberately is newer than whatever
+        // shipped inside the app, and is deleted once taken.
+        if let url = incomingURL,
+           let data = try? Data(contentsOf: url),
+           let record = try? PairingRecord.parse(data),
+           (try? store.save(record)) != nil {
+            try? FileManager.default.removeItem(at: url)
+            return true
+        }
 
+        // The bundled copy is read-only and stays where it is, so it is only
+        // taken when there is nothing already stored.
+        guard !store.hasRecord else { return false }
+        guard let url = bundledURL else { return false }
         guard let data = try? Data(contentsOf: url) else { return false }
         guard let record = try? PairingRecord.parse(data) else { return false }
         guard (try? store.save(record)) != nil else { return false }
