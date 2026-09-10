@@ -16,7 +16,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time",
 idevice = { version = "0.1.65", features = [
     "usbmuxd", "amfi", "installation_proxy", "afc", "misagent", "heartbeat", "house_arrest", "ring",
 ] }
-isideload = { version = "0.3", default-features = false, features = ["install", "tokio-mt"] }
+isideload = { version = "0.3", default-features = false, features = ["install", "tokio-mt", "fs-storage"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std"] }
 # isideload's storage trait returns this error type, so implementing it needs the crate.
 rootcause = "0.12"

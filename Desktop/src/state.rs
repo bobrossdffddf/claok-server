@@ -49,6 +49,15 @@ impl FileStorage {
         }
     }
 
+    /// Throws away only what the sign-in helper keeps, leaving the signing
+    /// certificate alone. State Apple has rejected is worse than none, because
+    /// keeping it means sending the same rejected thing again.
+    pub fn forget_anisette(&self) {
+        let mut map = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        map.retain(|key, _| !key.contains("anisette"));
+        self.flush(&map);
+    }
+
     /// Throws away the signing certificate so the next run asks Apple for a
     /// fresh one. Used when a certificate has been revoked out from under us.
     pub fn clear(&self) {

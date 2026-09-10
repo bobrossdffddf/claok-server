@@ -25,6 +25,10 @@ pub struct Config {
     /// and every tool that shares one stops working at once, so this can be
     /// changed without a new build. Empty means use the library's own.
     pub client_info: Option<String>,
+    /// The serial number the sign-in helper provisions itself with. The
+    /// library and the wider ecosystem both use "0"; this only exists so a
+    /// value can be tried without a new build.
+    pub anisette_serial: Option<String>,
     /// Whichever helper worked last time, tried first next time.
     pub anisette_last_good: Option<String>,
 }

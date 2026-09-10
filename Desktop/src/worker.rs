@@ -334,10 +334,27 @@ async fn install(
         }
     };
 
+    // The provider's state has to outlive the run.
+    //
+    // Without somewhere to keep it, the helper provisions itself against Apple
+    // from scratch on every single sign-in, which is a heavyweight exchange and
+    // exactly the sort of repeated request Apple started refusing. It also
+    // meant this computer introduced itself as a different machine every time.
+    // The library warned about this in the log on every run.
     let provider = RemoteV3AnisetteProvider::default()
         .map_err(|e| format!("Could not start the Apple sign-in helper: {e}"))?
         .set_url(&anisette_url)
-        .set_serial_number("2".to_string());
+        .set_storage(Box::new(crate::state::FileStorage::new()))
+        // "0" is what the library and every other tool provisions with. This
+        // was on "2" for no reason anybody recorded, and an identity that
+        // differs from the whole ecosystem's is the wrong kind of unusual when
+        // Apple is being strict about identity.
+        .set_serial_number(
+            config
+                .anisette_serial
+                .clone()
+                .unwrap_or_else(|| "0".to_string()),
+        );
 
     let identity = crate::anisette::client_info(&config);
     if let Some(value) = &identity {
@@ -365,6 +382,16 @@ async fn install(
         Err(error) => {
             let text = error.to_string();
             tracing::error!("sign-in failed on helper {anisette_url}: {text}");
+
+            // Kept state that Apple has rejected is worse than none: it would
+            // be sent again unchanged next time. Throwing it away costs one
+            // provisioning exchange on the next attempt and means that attempt
+            // is genuinely fresh rather than a repeat of this one.
+            if looks_like_bad_helper(&text) || looks_rate_limited(&text) {
+                crate::state::FileStorage::new().forget_anisette();
+                tracing::info!("cleared the stored sign-in helper state");
+            }
+
             return Err(friendly_login_error(&text));
         }
     };
