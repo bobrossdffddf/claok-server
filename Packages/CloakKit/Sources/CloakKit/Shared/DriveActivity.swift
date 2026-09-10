@@ -1,6 +1,10 @@
 import Foundation
 import ActivityKit
 
+// ActivityKit is iOS only. Guarding it lets CloakKit build for macOS, which
+// is what makes the tests runnable on a computer with no phone attached.
+#if os(iOS)
+
 /// What the Live Activity shows while a simulation is running.
 ///
 /// It has a second job beyond being useful: a running Live Activity is a
@@ -121,3 +125,4 @@ public extension SimulationMode {
         }
     }
 }
+#endif

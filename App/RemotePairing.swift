@@ -81,8 +81,16 @@ final class RemotePairing {
     /// that, the phone accepted pairing from a computer and showed the code
     /// itself. Both routes work, they just run opposite ways round.
     static var usesPairableHost: Bool {
-        if #available(iOS 27.0, *) { return true }
-        return false
+        PairingPlan.currentMajor >= PairingPlan.pairableHostMajor
+    }
+
+    /// What this phone will actually try, in order. Everything version
+    /// dependent goes through here so it can be answered without a phone.
+    static var plannedRoutes: [PairingRoute] {
+        PairingPlan.routes(
+            iOSMajor: PairingPlan.currentMajor,
+            hasStoredRecord: RemotePairingBackend.storedRecord != nil
+        )
     }
 
     /// Kept for the UI. Every supported system has a route now.
@@ -93,18 +101,24 @@ final class RemotePairing {
         reset()
         ignoreTunnel = ignoringTunnel
 
-        if storedRecord != nil {
+        // One list, decided by version and by whether a record already exists.
+        let planned = Self.plannedRoutes
+
+        if planned.contains(.stored) {
             await connectTunnel()
             return
         }
 
-        // Lockdown first, on every version. Its port never changes, so nothing
-        // has to be discovered: no Bonjour, no Local Network permission, no
-        // Wi-Fi. iOS shows its own Trust alert and that is the whole ceremony.
-        route = .lockdown
-        if await pairOverLockdown() {
-            await connectTunnel()
-            return
+        // Lockdown first wherever it is planned. Its port never changes, so
+        // nothing has to be discovered: no Bonjour, no Local Network
+        // permission, no Wi-Fi. iOS shows its own Trust alert and that is the
+        // whole ceremony.
+        if planned.contains(.lockdown) {
+            route = .lockdown
+            if await pairOverLockdown() {
+                await connectTunnel()
+                return
+            }
         }
 
         // Why it did not work matters more than what is tried next. Without
@@ -116,7 +130,7 @@ final class RemotePairing {
 
         // Only if that could not happen at all. These both need iOS to be
         // advertising something, which is exactly the part that fails.
-        if Self.usesPairableHost {
+        if planned.contains(.pairableHost) {
             route = .pairableHost
             startHost()
         } else {

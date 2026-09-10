@@ -1,5 +1,11 @@
 import AppIntents
 
+// Live Activities are an iOS feature, and the protocol behind these is
+// unavailable elsewhere. Guarding them lets CloakKit build for macOS, which
+// is what makes the test suite runnable on a computer with no phone and no
+// simulator attached.
+#if os(iOS)
+
 /// The buttons on the Live Activity.
 ///
 /// These live in CloakKit rather than in the app or the widget because both
@@ -57,3 +63,4 @@ public struct PanicRestoreIntent: LiveActivityIntent {
         return .result(dialog: "Simulation stopped.")
     }
 }
+#endif
