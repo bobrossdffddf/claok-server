@@ -180,6 +180,75 @@ public enum RemotePairingDiscovery {
         return Endpoint(hosts: own + rest, port: first)
     }
 
+    /// Everything Bonjour can actually see from this phone, as text somebody
+    /// can paste into a message.
+    ///
+    /// Written because guessing at why pairing cannot find the phone has cost
+    /// enough time already. It browses every service the pairing routes depend
+    /// on and records what each browser reported, including the states that
+    /// distinguish a refusal from an empty network.
+    public static func survey(timeout: TimeInterval = 6) async -> String {
+        var lines: [String] = ["Cloak pairing report"]
+        lines.append(ProcessInfo.processInfo.operatingSystemVersionString)
+        lines.append("reflector: \(Reflector.active().name)")
+        lines.append("remembered pairing port: \(cachedPort.map(String.init) ?? "none")")
+        lines.append("stored pairing record: \(RemotePairingBackend.storedRecord != nil ? "yes" : "no")")
+        lines.append("wifi or wired address: \(hasLocalNetworkInterface ? "yes" : "no")")
+        lines.append("")
+
+        for type in [
+            "_remotepairing._tcp",
+            "_remotepairing-pairable-host._tcp",
+            "_remoted._tcp",
+            "_apple-mobdev2._tcp",
+        ] {
+            lines.append("\(type)  ->  \(await probe(type: type, timeout: timeout))")
+        }
+
+        lines.append("")
+        lines.append("interfaces:")
+        lines.append(interfaceReport())
+        return lines.joined(separator: "\n")
+    }
+
+    private static func probe(type: String, timeout: TimeInterval) async -> String {
+        let browser = NWBrowser(for: .bonjour(type: type, domain: nil), using: .tcp)
+        let box = FoundEndpoints()
+        let notes = Notes()
+
+        browser.browseResultsChangedHandler = { results, _ in
+            for result in results { Task { await box.add(result.endpoint) } }
+        }
+        browser.stateUpdateHandler = { state in
+            switch state {
+            case .ready: Task { await notes.add("ready") }
+            case .waiting(let error): Task { await notes.add("waiting: \(error)") }
+            case .failed(let error): Task { await notes.add("failed: \(error)") }
+            case .cancelled: break
+            default: break
+            }
+        }
+        browser.start(queue: .global())
+
+        let deadline = Date().addingTimeInterval(timeout)
+        var found: [NWEndpoint] = []
+        while found.isEmpty && Date() < deadline {
+            found = await box.values
+            if found.isEmpty { try? await Task.sleep(for: .milliseconds(200)) }
+        }
+        browser.cancel()
+
+        let states = await notes.values
+        let detail = states.isEmpty ? "no state reported" : states.joined(separator: "; ")
+        return found.isEmpty ? "nothing (\(detail))" : "\(found.count) found (\(detail))"
+    }
+
+    private actor Notes {
+        private var items: [String] = []
+        func add(_ text: String) { if !items.contains(text) { items.append(text) } }
+        var values: [String] { items }
+    }
+
     private actor DeniedFlag {
         private var flag = false
         func set() { flag = true }

@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import CloakKit
 
 struct DiagnosticsView: View {
@@ -7,6 +8,8 @@ struct DiagnosticsView: View {
     @State private var busy = false
     @State private var testing = false
     @State private var testResult: String?
+    @State private var surveying = false
+    @State private var survey: String?
     @State private var showsRemotePairing = false
 
     var body: some View {
@@ -68,10 +71,41 @@ struct DiagnosticsView: View {
                         .buttonStyle(QuietButtonStyle())
                         .disabled(testing)
 
+                        Button(surveying ? "Looking" : "Check what pairing can see") {
+                            Task {
+                                surveying = true
+                                survey = await RemotePairingDiscovery.survey()
+                                surveying = false
+                            }
+                        }
+                        .buttonStyle(QuietButtonStyle())
+                        .disabled(surveying)
+
                         Button("Forget pairing record") {
                             model.clearPairing()
                         }
                         .buttonStyle(QuietButtonStyle(tint: Palette.danger))
+                    }
+
+                    if let survey {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Eyebrow(text: "What pairing can see")
+                            Text(survey)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(Palette.dim)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+
+                            Button {
+                                UIPasteboard.general.string = survey
+                                model.banner = "Copied."
+                            } label: {
+                                Label("Copy this", systemImage: "doc.on.doc")
+                            }
+                            .buttonStyle(QuietButtonStyle())
+                        }
+                        .padding(14)
+                        .background(Palette.surface, in: .rect(cornerRadius: 16, style: .continuous))
                     }
 
                     if let testResult {
