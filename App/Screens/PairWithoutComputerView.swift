@@ -29,6 +29,10 @@ struct PairWithoutComputerView: View {
                         waitingCard
                     }
 
+                    if case .trusting = pairing.phase {
+                        trustCard
+                    }
+
                     if case .needsTunnel = pairing.phase {
                         tunnelCard
                     }
@@ -206,6 +210,32 @@ struct PairWithoutComputerView: View {
         }
     }
 
+    /// iOS puts its own alert on screen here. Saying so plainly beats any
+    /// amount of progress spinner, because the phone is waiting on a person.
+    private var trustCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Eyebrow(text: "Look at your screen")
+            Text("iOS is asking whether to trust this computer. It means Cloak, running right here.")
+                .font(.label(14))
+                .foregroundStyle(.white)
+                .fixedSize(horizontal: false, vertical: true)
+
+            instruction(1, "Tap Trust on the alert.")
+            instruction(2, "Type this phone's passcode.")
+
+            Text("If no alert appeared, unlock the phone and it will show up. iOS will not pair while the screen is locked.")
+                .font(.label(12))
+                .foregroundStyle(Palette.dim)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(16)
+        .background(Palette.accent.opacity(0.08), in: .rect(cornerRadius: 18, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(Palette.accent.opacity(0.35), lineWidth: 1)
+        )
+    }
+
     private var waitingCard: some View {
         VStack(alignment: .leading, spacing: 12) {
             Eyebrow(text: "Now do this on the phone")
@@ -364,11 +394,15 @@ struct PairWithoutComputerView: View {
     private var stepList: some View {
         VStack(alignment: .leading, spacing: 8) {
             Eyebrow(text: "Progress")
-            if RemotePairing.usesPairableHost {
+            switch pairing.route {
+            case .lockdown:
+                step("Ask this phone to pair", state: stageState(1))
+                step("Tap Trust on the phone", state: stageState(3))
+            case .pairableHost:
                 step("Advertise Cloak as pairable", state: stageState(1))
                 step("The phone connects", state: stageState(2))
                 step("Type the code into iOS", state: stageState(3))
-            } else {
+            case .discovered:
                 step("Reach the pairing service", state: stageState(2))
                 step("Type the code from your phone", state: stageState(3))
             }
@@ -386,7 +420,7 @@ struct PairWithoutComputerView: View {
         case .idle, .failed, .needsTunnel: current = 0
         case .advertising: current = 1
         case .deviceConnected: current = 2
-        case .showPin, .enterPin: current = 3
+        case .showPin, .enterPin, .trusting: current = 3
         case .paired, .searching, .connecting, .tunnelling: current = 4
         case .mounting: current = 5
         case .ready(_, let dvt): current = dvt ? 7 : 6
@@ -476,6 +510,7 @@ struct PairWithoutComputerView: View {
     private var headerSymbol: String {
         switch pairing.phase {
         case .failed: return "exclamationmark.triangle.fill"
+        case .trusting: return "hand.tap.fill"
         case .needsTunnel: return "shield.lefthalf.filled"
         case .ready(_, let dvt): return dvt ? "checkmark.shield.fill" : "exclamationmark.shield.fill"
         case .showPin, .enterPin: return "number.circle.fill"
@@ -492,6 +527,7 @@ struct PairWithoutComputerView: View {
         case .deviceConnected: return "The phone is talking"
         case .showPin: return "Type this code"
         case .enterPin: return "Enter the code"
+        case .trusting: return "Tap Trust on this phone"
         case .paired: return "Paired"
         case .searching: return "Finding the phone"
         case .connecting: return "Connecting"
@@ -513,6 +549,7 @@ struct PairWithoutComputerView: View {
         case .deviceConnected: return pairing.detail ?? "Exchanging keys."
         case .showPin: return "iOS asked for the six digit code shown on this computer. It is below."
         case .enterPin: return "Your phone is showing a code. Type it in below."
+        case .trusting: return "iOS is asking whether to trust this computer. That is Cloak, on this phone."
         case .paired: return "Now raising the tunnel."
         case .searching: return "Looking for the phone's own pairing service."
         case .connecting: return pairing.detail ?? "Opening the socket."

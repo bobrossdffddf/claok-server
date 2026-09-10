@@ -15,6 +15,7 @@ use idevice::services::rsd::RsdHandshake;
 use idevice::RemoteXpcClient;
 use idevice::IdeviceService;
 
+pub mod lpair;
 pub mod renew;
 pub mod rp;
 

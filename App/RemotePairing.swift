@@ -24,6 +24,8 @@ final class RemotePairing {
         case connecting
         case tunnelling
         case mounting
+        /// iOS has put its own Trust alert on this phone's screen.
+        case trusting
         case ready(services: Int, hasDvt: Bool)
         /// Stopped before it could start, because the loopback reflector is
         /// not up and nothing downstream of it can work without it.
@@ -36,10 +38,22 @@ final class RemotePairing {
     var detail: String?
     var note: String?
     var services: [String] = []
+    /// Which way this attempt is going about it, so the screen can describe
+    /// the right thing rather than the thing that used to happen.
+    var route: Route = .lockdown
     /// Set when the failure was Local Network permission, so the screen can
     /// offer the one switch that fixes it rather than describing it.
     var needsLocalNetwork = false
     var hostName = UIDevice.current.name.isEmpty ? "Cloak" : "Cloak on \(UIDevice.current.name)"
+
+    enum Route: Equatable {
+        /// Straight to this phone's own lockdown service on its fixed port.
+        case lockdown
+        /// iOS 27 and later, where the phone pairs outward to a computer.
+        case pairableHost
+        /// The old route through iOS's advertised pairing service.
+        case discovered
+    }
 
     private let advertiser = PairableHostAdvertiser()
     private var poller: Task<Void, Never>?
@@ -76,14 +90,67 @@ final class RemotePairing {
         reset()
         ignoreTunnel = ignoringTunnel
 
-        if storedRecord != nil || !Self.usesPairableHost {
-            // On iOS 26 the tunnel route does the pairing itself: the handshake
-            // fails to verify, the bridge falls through to pair-setup, and iOS
-            // puts a code on screen for the user to type in here.
+        if storedRecord != nil {
             await connectTunnel()
-        } else {
-            startHost()
+            return
         }
+
+        // Lockdown first, on every version. Its port never changes, so nothing
+        // has to be discovered: no Bonjour, no Local Network permission, no
+        // Wi-Fi. iOS shows its own Trust alert and that is the whole ceremony.
+        route = .lockdown
+        if await pairOverLockdown() {
+            await connectTunnel()
+            return
+        }
+
+        // Only if that could not happen at all. These both need iOS to be
+        // advertising something, which is exactly the part that fails.
+        if Self.usesPairableHost {
+            route = .pairableHost
+            startHost()
+        } else {
+            route = .discovered
+            await connectTunnel()
+        }
+    }
+
+    /// Pairs by asking this phone's own lockdown service, over the reflector.
+    private func pairOverLockdown() async -> Bool {
+        phase = .searching
+        detail = nil
+
+        // iOS resets a connection a device makes to itself, so without the
+        // reflector there is nothing on the other end of this.
+        let reflector = await TunnelGate.ensureUp(target: RemotePairingDiscovery.serviceAddress())
+        if !reflector && !ignoreTunnel {
+            note = nil
+            phase = .needsTunnel
+            return false
+        }
+
+        let paired = await LockdownPairing.pair { [weak self] progress in
+            guard let self else { return }
+            switch progress {
+            case .idle:
+                break
+            case .connecting(let address):
+                self.phase = .searching
+                self.detail = "Asking this phone to pair on \(address)"
+            case .waitingForTrust:
+                self.phase = .trusting
+                self.detail = nil
+            case .paired:
+                self.phase = .paired
+                self.detail = nil
+                self.note = nil
+            case .failed(let reason):
+                self.note = reason
+            }
+        }
+
+        if paired { note = nil }
+        return paired
     }
 
     func submitPin() {
@@ -126,6 +193,7 @@ final class RemotePairing {
         startedTunnel = false
         ignoreTunnel = false
         needsLocalNetwork = false
+        route = .lockdown
         detail = nil
         note = nil
         services = []

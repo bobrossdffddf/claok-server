@@ -43,6 +43,13 @@ int cloak_rp_mount(const unsigned char *image, size_t image_len,
 int cloak_rp_stop(void);
 int cloak_rp_host_start(const char *name, const char *pairing_base64, const char *alt_irk_base64);
 
+/* Pairing this phone with itself over lockdown, no Bonjour involved. */
+int cloak_lockdown_pair_start(const char *addresses,
+                              const char *host_id,
+                              const char *system_buid,
+                              const char *host_name);
+int cloak_lockdown_pair_state(char *out, size_t capacity);
+
 /* Renewing the signature from the phone itself. */
 int cloak_renew_start(const char *apple_id,
                       const char *password,
