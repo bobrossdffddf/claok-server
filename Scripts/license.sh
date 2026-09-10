@@ -24,8 +24,38 @@ EOF
 fi
 
 # shellcheck source=/dev/null
-. "$ENV_FILE"
-[ -n "${CLOAK_ADMIN_TOKEN:-}" ] || { echo "CLOAK_ADMIN_TOKEN is empty in $ENV_FILE"; exit 1; }
+# Tolerant reader: ignores spaces around =, surrounding quotes, and Windows line endings.
+read_env() {
+  key="$1"
+  v=$(tr -d '\r' < "$ENV_FILE" | sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//p" | sed "s/[[:space:]]*$//" | tail -n 1)
+  case "$v" in
+    \"*\") v=${v#\"}; v=${v%\"} ;;
+  esac
+  printf '%s' "$v"
+}
+
+CLOAK_URL="$(read_env CLOAK_URL)"
+CLOAK_ADMIN_TOKEN="$(read_env CLOAK_ADMIN_TOKEN)"
+
+if [ -z "$CLOAK_ADMIN_TOKEN" ]; then
+  echo "No admin token found in $ENV_FILE"
+  echo
+  echo "That file currently holds:"
+  sed "s/\r$/<CR>/" "$ENV_FILE" | sed "s/^/    /"
+  echo
+  echo "It needs a line shaped exactly like this, with no spaces around the = sign:"
+  echo "    CLOAK_ADMIN_TOKEN=your-token-here"
+  echo
+  echo "Your admin token is the CLOAK_ADMIN_TOKEN value in Server/.env on the machine"
+  echo "running the server. Open $ENV_FILE, paste it in, save, and run this again."
+  exit 1
+fi
+
+if [ -z "$CLOAK_URL" ] || case "$CLOAK_URL" in *yourdomain.com*) true;; *) false;; esac; then
+  echo "CLOAK_URL in $ENV_FILE is still the placeholder. Set it to your real address,"
+  echo "for example: CLOAK_URL=https://claokkey.wackoxyz.org"
+  exit 1
+fi
 
 URL="${CLOAK_URL%/}"
 AUTH=(-H "x-admin-token: $CLOAK_ADMIN_TOKEN" -H 'content-type: application/json')
