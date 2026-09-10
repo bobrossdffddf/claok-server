@@ -1,4 +1,5 @@
 import Foundation
+import os
 import CloakKit
 
 /// Picks up a pairing record left in Cloak's Documents folder by the desktop
@@ -10,6 +11,8 @@ import CloakKit
 /// code and all, never has to happen.
 enum PairingHandoff {
     static let fileName = "cloak-pairing.plist"
+
+    private static let log = Logger(subsystem: "app.cloak.ios", category: "pairing-handoff")
 
     /// The copy that came inside the app.
     ///
@@ -45,16 +48,35 @@ enum PairingHandoff {
            let record = try? PairingRecord.parse(data),
            (try? store.save(record)) != nil {
             try? FileManager.default.removeItem(at: url)
+            log.notice("adopted the pairing record left in Documents")
             return true
         }
 
         // The bundled copy is read-only and stays where it is, so it is only
         // taken when there is nothing already stored.
-        guard !store.hasRecord else { return false }
-        guard let url = bundledURL else { return false }
-        guard let data = try? Data(contentsOf: url) else { return false }
-        guard let record = try? PairingRecord.parse(data) else { return false }
-        guard (try? store.save(record)) != nil else { return false }
+        guard !store.hasRecord else {
+            log.notice("already had a pairing record, nothing to adopt")
+            return false
+        }
+        guard let url = bundledURL else {
+            log.notice("no pairing record came with this build")
+            return false
+        }
+        guard let data = try? Data(contentsOf: url) else {
+            log.error("the bundled pairing record could not be read")
+            return false
+        }
+        guard let record = try? PairingRecord.parse(data) else {
+            log.error("the bundled pairing record did not parse")
+            return false
+        }
+        do {
+            try store.save(record)
+        } catch {
+            log.error("the bundled pairing record could not be stored: \(String(describing: error), privacy: .public)")
+            return false
+        }
+        log.notice("adopted the pairing record that came inside the app")
         return true
     }
 }
