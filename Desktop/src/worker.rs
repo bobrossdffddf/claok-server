@@ -282,40 +282,74 @@ async fn install(
         let _ = events.send(Event::Status(text.to_string()));
     };
 
-    step(0.04, "Reaching Apple");
+    step(0.04, "Checking the connection");
 
-    let anisette = RemoteV3AnisetteProvider::default()
-        .map_err(|e| format!("Could not start the Apple sign-in helper: {e}"))?
-        .set_serial_number("2".to_string());
+    // Ask before anybody types a password. Sign-in is a run of requests over
+    // the best part of a minute, and finding out at the end that the network
+    // was never going to work reads as though the password was wrong.
+    if let Err(detail) = apple_reachable().await {
+        tracing::warn!("cannot reach Apple: {detail}");
+        return Err(unreachable_message());
+    }
 
+    step(0.06, "Reaching Apple");
     step(0.08, "Signing in with your Apple ID");
 
-    let two_factor = {
-        let events = events.clone();
-        let code_rx = code_rx.clone();
-        move |params: TwoFactorCallbackParams| {
-            let events = events.clone();
-            let code_rx = code_rx.clone();
-            async move {
-                let mut guard = code_rx.lock().await;
-                while guard.try_recv().is_ok() {}
-                let _ = events.send(Event::NeedTwoFactor(Box::new(params)));
-                match guard.recv().await {
-                    Some(response) => Ok(response),
-                    None => Ok(TwoFactorCallbackResponse::Abort),
+    // Up to three goes, because a dropped connection or one of Apple's own 503s
+    // is not something to hand back to somebody as a stack trace and a retyped
+    // password. Only transport failures are retried: a wrong password is
+    // answered the first time and stays answered.
+    let mut account = {
+        let mut attempt = 0u8;
+        loop {
+            attempt += 1;
+
+            let two_factor = {
+                let events = events.clone();
+                let code_rx = code_rx.clone();
+                move |params: TwoFactorCallbackParams| {
+                    let events = events.clone();
+                    let code_rx = code_rx.clone();
+                    async move {
+                        let mut guard = code_rx.lock().await;
+                        while guard.try_recv().is_ok() {}
+                        let _ = events.send(Event::NeedTwoFactor(Box::new(params)));
+                        match guard.recv().await {
+                            Some(response) => Ok(response),
+                            None => Ok(TwoFactorCallbackResponse::Abort),
+                        }
+                    }
+                }
+            };
+
+            let anisette = RemoteV3AnisetteProvider::default()
+                .map_err(|e| format!("Could not start the Apple sign-in helper: {e}"))?
+                .set_serial_number("2".to_string());
+
+            // No time limit on the login as a whole, because a person may take
+            // minutes to find the code on another device.
+            match AppleAccount::builder(apple_id)
+                .anisette_provider(anisette)
+                .login(password, two_factor)
+                .await
+            {
+                Ok(account) => break account,
+                Err(error) => {
+                    let text = error.to_string();
+                    if attempt < 3 && looks_transient(&text) {
+                        tracing::warn!("sign-in attempt {attempt} dropped: {text}");
+                        let _ = events.send(Event::Status(
+                            "The connection dropped. Trying again".to_string(),
+                        ));
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                        continue;
+                    }
+                    tracing::error!("sign-in failed: {text}");
+                    return Err(friendly_login_error(&text));
                 }
             }
         }
     };
-
-    // No time limit on the login as a whole, because a person may take minutes
-    // to find the code on another device. The steps that involve no human do
-    // get one.
-    let mut account = AppleAccount::builder(apple_id)
-        .anisette_provider(anisette)
-        .login(password, two_factor)
-        .await
-        .map_err(|e| friendly_login_error(&e.to_string()))?;
 
     if remember {
         let _ = StoredPassword::save(apple_id, password);
@@ -643,14 +677,66 @@ fn hostname() -> String {
 
 // MARK: - Errors people can act on
 
+/// Whether Apple answers at all from this network.
+///
+/// A plain TCP connect, because it is the cheapest thing that catches the whole
+/// family of causes: no DNS, no route, a filtered network, a captive portal
+/// that has not been signed into.
+async fn apple_reachable() -> Result<(), String> {
+    for host in ["gsa.apple.com:443", "developerservices2.apple.com:443"] {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            tokio::net::TcpStream::connect(host),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => return Err(format!("{host}: {error}")),
+            Err(_) => return Err(format!("{host}: timed out")),
+        }
+    }
+    Ok(())
+}
+
+fn unreachable_message() -> String {
+    "Cloak cannot reach Apple from this network.\n\nSigning in has to talk to apple.com, and something between this computer and Apple is blocking or dropping it. Work, school and guest networks very often do.\n\nTry again on a home network, or share your phone's internet connection and use that.".to_string()
+}
+
+/// Whether a sign-in failure was the network rather than the account.
+///
+/// These all mean the same thing to somebody sitting in front of it, which is
+/// that nothing they typed was wrong and trying again may simply work.
+fn looks_transient(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("error sending request")
+        || lower.contains("url bag")
+        || lower.contains("503")
+        || lower.contains("502")
+        || lower.contains("504")
+        || lower.contains("temporarily unavailable")
+        || lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("connection reset")
+        || lower.contains("connection closed")
+        || lower.contains("dns")
+}
+
 fn friendly_login_error(raw: &str) -> String {
     let lower = raw.to_lowercase();
-    if lower.contains("-20101") || lower.contains("incorrect") || lower.contains("password") {
+    if lower.contains("-20101") || lower.contains("incorrect") {
         "That Apple ID and password did not match. Note that an app-specific password will not work here — use the real one.".into()
-    } else if lower.contains("anisette") {
-        "The Apple sign-in helper could not be reached. Check the internet connection and try again.".into()
     } else if lower.contains("locked") {
         "Apple has locked this account for security. Sign in at appleid.apple.com first, then come back.".into()
+    } else if looks_transient(&lower) {
+        // Three goes have already been had by the time this is reached.
+        format!(
+            "{}\n\nCloak tried three times and the connection failed every time.",
+            unreachable_message()
+        )
+    } else if lower.contains("anisette") {
+        "The Apple sign-in helper could not be reached. Check the internet connection and try again.".into()
+    } else if lower.contains("password") {
+        "That Apple ID and password did not match. Note that an app-specific password will not work here — use the real one.".into()
     } else {
         format!("Signing in failed.\n\n{raw}")
     }
