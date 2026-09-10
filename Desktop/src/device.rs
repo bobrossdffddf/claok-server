@@ -16,6 +16,13 @@ pub struct Phone {
     pub name: String,
     pub ios_version: String,
     pub developer_mode: DeveloperMode,
+    /// Whether this phone has tapped Trust on this computer.
+    ///
+    /// Nothing works without it, including reading which iOS it runs and
+    /// asking it to show the Developer Mode switch, so a phone that has not
+    /// been trusted looks identical to one that is simply not ready. Saying
+    /// which it is turns a dead end into one tap.
+    pub trusted: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,12 +72,16 @@ pub async fn list_phones() -> Result<Vec<Phone>, String> {
     let mut phones = Vec::new();
     for device in devices {
         let provider = device.to_provider(addr.clone(), LABEL);
-        let phone = describe(&provider, &device.udid).await.unwrap_or(Phone {
-            udid: device.udid.clone(),
-            name: "iPhone".into(),
-            ios_version: "".into(),
-            developer_mode: DeveloperMode::Unknown,
-        });
+        let phone = describe(&provider, &device.udid)
+            .await
+            .unwrap_or_else(|_| untrusted(&device.udid));
+        tracing::info!(
+            "found phone: name={:?} ios={:?} developer_mode={:?} trusted={}",
+            phone.name,
+            phone.ios_version,
+            phone.developer_mode,
+            phone.trusted,
+        );
         phones.push(phone);
     }
     Ok(phones)
@@ -94,19 +105,36 @@ pub async fn provider_for(udid: &str) -> Result<impl IdeviceProvider, String> {
     Ok(device.to_provider(addr, LABEL))
 }
 
-async fn describe(provider: &dyn IdeviceProvider, udid: &str) -> Result<Phone, String> {
-    let mut lockdown = LockdownClient::connect(provider)
-        .await
-        .map_err(|e| format!("Could not talk to the iPhone: {e}"))?;
+fn untrusted(udid: &str) -> Phone {
+    Phone {
+        udid: udid.to_string(),
+        name: "iPhone".into(),
+        ios_version: String::new(),
+        developer_mode: DeveloperMode::Unknown,
+        trusted: false,
+    }
+}
 
-    let pairing = provider
-        .get_pairing_file()
-        .await
-        .map_err(|_| trust_prompt())?;
-    lockdown
-        .start_session(&pairing)
-        .await
-        .map_err(|_| trust_prompt())?;
+async fn describe(provider: &dyn IdeviceProvider, udid: &str) -> Result<Phone, String> {
+    let mut lockdown = match LockdownClient::connect(provider).await {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::warn!("lockdown refused: {error}");
+            return Ok(untrusted(udid));
+        }
+    };
+
+    let pairing = match provider.get_pairing_file().await {
+        Ok(pairing) => pairing,
+        Err(error) => {
+            tracing::info!("no pairing record yet, phone has not trusted us: {error}");
+            return Ok(untrusted(udid));
+        }
+    };
+    if let Err(error) = lockdown.start_session(&pairing).await {
+        tracing::info!("lockdown session refused, phone has not trusted us: {error}");
+        return Ok(untrusted(udid));
+    }
 
     let name = lockdown
         .get_value(Some("DeviceName"), None)
@@ -149,12 +177,8 @@ async fn describe(provider: &dyn IdeviceProvider, udid: &str) -> Result<Phone, S
         name,
         ios_version,
         developer_mode,
+        trusted: true,
     })
-}
-
-fn trust_prompt() -> String {
-    "This iPhone has not trusted this computer yet. Unlock it, tap Trust, then try again."
-        .to_string()
 }
 
 /// Makes the Developer Mode switch visible in Settings.
@@ -163,12 +187,19 @@ fn trust_prompt() -> String {
 /// exactly the wall people hit when they try to follow instructions that say
 /// "go to Privacy & Security and turn on Developer Mode" and find no such row.
 pub async fn reveal_developer_mode(provider: &dyn IdeviceProvider) -> Result<(), String> {
-    let mut amfi = AmfiClient::connect(provider)
+    let mut amfi = AmfiClient::connect(provider).await.map_err(|e| {
+        tracing::warn!("amfi connect failed while revealing: {e}");
+        format!("Could not reach the security service on the iPhone: {e}")
+    })?;
+    let result = amfi
+        .reveal_developer_mode_option_in_ui()
         .await
-        .map_err(|e| format!("Could not reach the security service on the iPhone: {e}"))?;
-    amfi.reveal_developer_mode_option_in_ui()
-        .await
-        .map_err(|e| format!("The iPhone refused to show the Developer Mode switch: {e}"))
+        .map_err(|e| format!("The iPhone refused to show the Developer Mode switch: {e}"));
+    match &result {
+        Ok(()) => tracing::info!("asked the iPhone to show the Developer Mode switch"),
+        Err(message) => tracing::warn!("reveal failed: {message}"),
+    }
+    result
 }
 
 /// Turns Developer Mode on. The phone reboots as a result.
@@ -177,7 +208,9 @@ pub async fn enable_developer_mode(provider: &dyn IdeviceProvider) -> Result<(),
         .await
         .map_err(|e| format!("Could not reach the security service on the iPhone: {e}"))?;
 
+    tracing::info!("asking the iPhone to turn Developer Mode on");
     amfi.enable_developer_mode().await.map_err(|e| {
+        tracing::warn!("enable failed: {e}");
         let text = e.to_string();
         if text.contains("passcode") {
             "iOS will not turn Developer Mode on while a passcode is set. Turn the passcode off in Settings, do this step, then put it back.".to_string()
@@ -192,6 +225,7 @@ pub async fn accept_developer_mode(provider: &dyn IdeviceProvider) -> Result<(),
     let mut amfi = AmfiClient::connect(provider)
         .await
         .map_err(|e| format!("Could not reach the security service on the iPhone: {e}"))?;
+    tracing::info!("confirming Developer Mode after the restart");
     amfi.accept_developer_mode()
         .await
         .map_err(|e| format!("The iPhone would not confirm Developer Mode: {e}"))

@@ -87,7 +87,18 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: Events, ipa: Path
                     continue;
                 }
                 match device::list_phones().await {
-                    Ok(phones) => { let _ = events.send(Event::Phones(phones)); }
+                    Ok(phones) => {
+                        // Ask for the switch straight away rather than waiting
+                        // for somebody to press a button for it. iOS hides the
+                        // Developer Mode row until a developer tool asks, so
+                        // telling people to go and find it before asking is
+                        // telling them to look at something that is not there.
+                        // Revealing an already visible switch does nothing.
+                        if reveal_where_needed(&phones).await {
+                            let _ = events.send(Event::DeveloperModeRevealed);
+                        }
+                        let _ = events.send(Event::Phones(phones));
+                    }
                     Err(message) => { let _ = events.send(Event::Failed(message)); }
                 }
             }
@@ -135,6 +146,29 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: Events, ipa: Path
 }
 
 // MARK: - Developer Mode
+
+/// Makes the Developer Mode switch appear on every plugged in phone that
+/// needs it, and says whether any of them accepted.
+///
+/// A phone that has not been trusted cannot be asked, and a phone already
+/// running with it on has nothing to reveal, so both are skipped quietly.
+async fn reveal_where_needed(phones: &[device::Phone]) -> bool {
+    let mut revealed = false;
+    for phone in phones {
+        if !phone.trusted {
+            tracing::info!("skipping reveal, {} has not trusted this computer", phone.name);
+            continue;
+        }
+        if developer_mode_ok(phone) {
+            continue;
+        }
+        let Ok(provider) = device::provider_for(&phone.udid).await else { continue };
+        if device::reveal_developer_mode(&provider).await.is_ok() {
+            revealed = true;
+        }
+    }
+    revealed
+}
 
 async fn enable_developer_mode(udid: &str, events: &Events) {
     let provider = match device::provider_for(udid).await {

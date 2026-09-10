@@ -423,10 +423,15 @@ impl Installer {
             ui.add_space(16.0);
         }
 
-        if self.revealed {
+        if self.chosen.as_ref().is_some_and(|phone| !phone.trusted) {
+            notice(ui, skin::ORANGE, Color32::from_rgb(255, 247, 235), icon::WRENCH,
+                "The iPhone has not trusted this computer",
+                "None of this can happen until it does. Unlock the screen, tap Trust This Computer on the phone, type its passcode, then unplug it and plug it back in.");
+            ui.add_space(16.0);
+        } else if self.revealed {
             notice(ui, skin::GREEN, Color32::from_rgb(236, 249, 241), icon::CHECK_CIRCLE,
                 "The switch is there now",
-                "On the phone: Settings, then Privacy & Security, then Developer Mode.");
+                "On the phone: Settings, then Privacy & Security, then Developer Mode. If Settings was already open, close it fully and open it again, because it will not redraw a page it is already showing.");
             ui.add_space(16.0);
         }
 
@@ -580,8 +585,13 @@ impl Installer {
 
         ui.add_space(16.0);
 
+        let untrusted = self.chosen.as_ref().is_some_and(|phone| !phone.trusted);
         let needs_developer_mode = !self.chosen.as_ref().is_some_and(worker::developer_mode_ok);
-        if needs_developer_mode {
+        if untrusted {
+            notice(ui, skin::ORANGE, Color32::from_rgb(255, 247, 235), icon::WRENCH,
+                "Unlock the iPhone and tap Trust",
+                "It has not trusted this computer yet, so nothing can be read from it or changed on it. Unlock the screen, tap Trust This Computer, type the passcode, then plug it in again.");
+        } else if needs_developer_mode {
             notice(ui, skin::ORANGE, Color32::from_rgb(255, 247, 235), icon::WRENCH,
                 "Developer Mode is off",
                 "That is normal and expected. The next screen turns it on for you, which takes one restart of the phone.");
@@ -988,6 +998,7 @@ fn phone_row(ui: &mut egui::Ui, phone: &Phone, quiet: bool) -> bool {
                             DeveloperMode::On => ("Developer Mode on", skin::GREEN),
                             DeveloperMode::NotApplicable => ("Not needed on this iOS", skin::GREEN),
                             DeveloperMode::Off => ("Developer Mode off", skin::ORANGE),
+                            DeveloperMode::Unknown if !phone.trusted => ("Not trusted yet", skin::ORANGE),
                             DeveloperMode::Unknown => ("Could not read the setting", skin::TERTIARY),
                         };
                         ui.label(RichText::new(label).size(12.5).color(tint));
