@@ -35,6 +35,9 @@ final class AppModel: NSObject {
     var isPeeking = false
     var locationAuthorization: CLAuthorizationStatus = .notDetermined
     private let peek = LocationPeek()
+    /// Whether the continuous location feed is currently running, so it is not
+    /// started twice or stopped when it was never going.
+    private var locationActive = false
     private let liveActivity = DriveActivityController()
     private var autoStopTask: Task<Void, Never>?
 
@@ -90,17 +93,65 @@ final class AppModel: NSObject {
     /// screen.
     private func applyLocationAuthorization(_ status: CLAuthorizationStatus) {
         locationAuthorization = status
+        updateLocationNeed()
+    }
 
-        guard status == .authorizedAlways || status == .authorizedWhenInUse else {
-            locationManager.stopUpdatingLocation()
+    /// Whether anything actually wants the real position right now.
+    ///
+    /// Three things do: a running simulation, which iOS keeps alive in the
+    /// background only while location is genuinely being delivered; a recording,
+    /// which is made of real positions; and the geofence guard, which cannot
+    /// notice you leaving an area it is not watching.
+    ///
+    /// Nothing else does. Sitting on the map does not.
+    private var needsRealLocation: Bool {
+        snapshot.isRunning || isRecording || geofence.isEnabled
+    }
+
+    /// Starts and stops location to match.
+    ///
+    /// This used to switch on the moment permission was granted and never
+    /// switch off, so the arrow in the status bar was lit from launch until the
+    /// app was killed, whether or not anything was happening. iOS shows that
+    /// arrow because an app is holding location open, and the honest way to put
+    /// it out is to stop holding it.
+    private func updateLocationNeed() {
+        let allowed = locationAuthorization == .authorizedAlways
+            || locationAuthorization == .authorizedWhenInUse
+
+        guard allowed, needsRealLocation else {
+            if locationActive {
+                locationManager.stopUpdatingLocation()
+                // Left on while idle, this alone is enough to keep the arrow lit
+                // on some versions.
+                locationManager.allowsBackgroundLocationUpdates = false
+                locationActive = false
+            }
             return
         }
 
+        guard !locationActive else { return }
+
         locationManager.desiredAccuracy = kCLLocationAccuracyBest
         locationManager.pausesLocationUpdatesAutomatically = false
-        locationManager.allowsBackgroundLocationUpdates = (status == .authorizedAlways)
+        locationManager.allowsBackgroundLocationUpdates =
+            (locationAuthorization == .authorizedAlways)
         locationManager.showsBackgroundLocationIndicator = true
         locationManager.startUpdatingLocation()
+        locationActive = true
+    }
+
+    /// Reads the real position once, for the things that want it now and then
+    /// rather than continuously.
+    ///
+    /// Without this, asking where the phone is would mean turning the
+    /// continuous feed on and leaving it on, which is the behaviour being
+    /// removed. A single request lights the arrow for a moment and no longer.
+    func readRealPositionOnce() {
+        let allowed = locationAuthorization == .authorizedAlways
+            || locationAuthorization == .authorizedWhenInUse
+        guard allowed, !locationActive else { return }
+        locationManager.requestLocation()
     }
 
     /// True when the simulation will keep running with the app off screen.
@@ -128,6 +179,7 @@ final class AppModel: NSObject {
 
     func refreshSnapshot() async {
         hasLocalNetwork = RemotePairingDiscovery.hasLocalNetworkInterface
+        updateLocationNeed()
         snapshot = await engine.current
         liveActivity.sync(with: snapshot)
         if isRecording, let fix = snapshot.fix {
@@ -600,7 +652,10 @@ final class AppModel: NSObject {
 
     func saveGeofenceHere() {
         guard let real = realPosition else {
-            banner = "No real position yet."
+            // The continuous feed is only held while something needs it, so
+            // there may be no position yet. Ask for one rather than refusing.
+            readRealPositionOnce()
+            banner = "Finding where you are. Try that again in a moment."
             return
         }
         geofence.center = real
@@ -667,5 +722,8 @@ extension AppModel: CLLocationManagerDelegate {
         }
     }
 
-    nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {}
+    nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        // A one shot request that fails is not worth a banner: the map simply
+        // keeps whatever it had.
+    }
 }
