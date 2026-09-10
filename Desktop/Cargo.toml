@@ -1,6 +1,6 @@
 [package]
 name = "cloak-installer"
-version = "1.0.0"
+version = "1.2.0"
 edition = "2021"
 description = "Puts Cloak on your iPhone and keeps it there."
 

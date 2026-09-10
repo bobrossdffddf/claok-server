@@ -6,6 +6,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="$HOME/.cloak-build"
+
+# shellcheck source=version.sh
+. "$ROOT/Scripts/version.sh"
 OUT="$ROOT/Desktop/payload"
 
 export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
@@ -31,6 +34,8 @@ xcodebuild -project Cloak.xcodeproj -scheme CloakFree -configuration Release \
   -destination 'generic/platform=iOS' \
   -derivedDataPath "$BUILD/dd-free" \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+  MARKETING_VERSION="$CLOAK_VERSION" \
+  CURRENT_PROJECT_VERSION="$CLOAK_BUILD" \
   DEBUG_INFORMATION_FORMAT=dwarf \
   GCC_GENERATE_DEBUGGING_SYMBOLS=NO \
   SWIFT_DEBUG_INFORMATION_FORMAT=none \
@@ -55,7 +60,7 @@ mkdir -p "$OUT"
 rm -f "$OUT/Cloak.ipa"
 cd "$BUILD/ipa"
 zip -qry "$OUT/Cloak.ipa" Payload
-echo "wrote $OUT/Cloak.ipa"
+echo "wrote $OUT/Cloak.ipa  (version $CLOAK_VERSION, build $CLOAK_BUILD)"
 ls -lh "$OUT/Cloak.ipa"
 
 # This build gets handed to strangers, so prove the builder is not in it
