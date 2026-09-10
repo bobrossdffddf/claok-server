@@ -13,13 +13,13 @@ public enum Licensing {
            let url = URL(string: override) {
             return url
         }
-        return URL(string: "https://cloak.example.com")!
+        return URL(string: "https://claokkey.wackoxyz.org")!
     }
 
     /// Base64 of the server's Ed25519 public key, printed by the server on
     /// first run. Empty means licensing is not configured and the app runs
     /// unlocked, which is what a development build wants.
-    public static let serverPublicKey = ""
+    public static let serverPublicKey = "3Rj+nkwR26+rK/ZeH/KPkorvgfwo9GxXeRFDDYeBCS4="
 
     public static var isConfigured: Bool { !serverPublicKey.isEmpty }
 

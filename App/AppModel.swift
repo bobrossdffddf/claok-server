@@ -26,6 +26,8 @@ final class AppModel: NSObject {
     var routeStatus: String?
     var recordingFixes: [SimulatedFix] = []
     var isRecording = false
+    /// How fast a simulated drive sits against the posted limits.
+    var speedHelp = SpeedHelp.load()
     var imageTransfer: String?
     var hasDeveloperImage = DeveloperImageBundle.isPresent
     var hasPairing = false
@@ -542,6 +544,13 @@ final class AppModel: NSObject {
         let token = LicenseStore.savedToken
         _ = await imageDelivery.fetch(token: token)
         hasDeveloperImage = DeveloperImageBundle.isPresent
+    }
+
+    /// Takes effect on the next drive without anything being restarted, since
+    /// the profile is read when a route is built.
+    func setSpeedHelp(_ value: SpeedHelp) {
+        speedHelp = value
+        value.save()
     }
 
     /// Asks for Always location, which is what keeps a drive running with the

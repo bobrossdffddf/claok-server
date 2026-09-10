@@ -33,7 +33,36 @@ public struct RoutePlan: Sendable {
         self.expectedTravelTime = expectedTravelTime
     }
 
-    public func speedProfile(persona: DriverPersona, seed: UInt64) -> SpeedProfile {
+    /// How long the drive takes at the chosen profile.
+    ///
+    /// The routing service's own estimate assumes its own speeds, so with a
+    /// profile applied it describes a different drive from the one being
+    /// simulated. Scaling it by the ratio of the targets keeps the arrival time
+    /// on screen honest about what is actually going to happen.
+    public func expectedTravelTime(with speedHelp: SpeedHelp) -> TimeInterval {
+        guard speedHelp.isEnabled, mode == .drive else { return expectedTravelTime }
+
+        let densified = polyline.densified(spacing: 5)
+        let limits = metadata.limits(along: densified, fallback: .residential)
+        guard !limits.isEmpty else { return expectedTravelTime }
+
+        var baseline = 0.0
+        var adjusted = 0.0
+        for posted in limits {
+            let target = speedHelp.target(postedLimit: posted, fallback: posted)
+            baseline += posted
+            adjusted += max(target, Speed.mph(3))
+        }
+        guard adjusted > 0, baseline > 0 else { return expectedTravelTime }
+
+        return expectedTravelTime * (baseline / adjusted)
+    }
+
+    public func speedProfile(
+        persona: DriverPersona,
+        speedHelp: SpeedHelp = SpeedHelp(),
+        seed: UInt64
+    ) -> SpeedProfile {
         let densified = polyline.densified(spacing: 5)
         let limits = metadata.limits(along: densified, fallback: mode == .drive ? .residential : .footway)
         let controls = metadata.snappedControls(to: densified)
@@ -43,6 +72,7 @@ public struct RoutePlan: Sendable {
             controls: controls,
             persona: persona,
             mode: mode,
+            speedHelp: speedHelp,
             seed: seed
         )
     }

@@ -54,6 +54,7 @@ public enum SpeedProfileBuilder {
         controls: [TrafficControl],
         persona: DriverPersona,
         mode: TravelMode,
+        speedHelp: SpeedHelp = SpeedHelp(),
         seed: UInt64
     ) -> SpeedProfile {
         var generator = SeededGenerator(seed: seed)
@@ -71,7 +72,12 @@ public enum SpeedProfileBuilder {
             let target: Double
             switch mode {
             case .drive:
-                target = max(Speed.mph(5), posted + persona.speedOffset)
+                // The persona's own habit is the starting point. Speed help,
+                // when it is on, decides instead, and it decides per point, so
+                // the drive follows the limits along the route rather than
+                // holding one number the whole way.
+                let habit = max(Speed.mph(5), posted + persona.speedOffset)
+                target = speedHelp.target(postedLimit: posted, fallback: habit)
             case .walk, .run, .cycle:
                 target = band.upperBound
             }

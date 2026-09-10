@@ -22,6 +22,7 @@ struct SettingsView: View {
                     statusSection
                     tunnelSection
                     safetySection
+                    speedHelpSection
                     drivingSection
                     licenseSection
                     setupSection
@@ -180,6 +181,93 @@ struct SettingsView: View {
                 Task { await model.peekRealLocation() }
             }
             .disabled(model.isPeeking)
+        }
+    }
+
+    private var speedHelpSection: some View {
+        Section(
+            title: "Speed help",
+            footer: "Sets how fast a simulated drive goes against the speed limit of each road it passes along, adjusting as the limits change. It shapes the drive Cloak plays back and does not read how the phone is really moving."
+        ) {
+            VStack(alignment: .leading, spacing: 14) {
+                Toggle(isOn: Binding(
+                    get: { model.speedHelp.isEnabled },
+                    set: { model.setSpeedHelp(model.speedHelp.with(isEnabled: $0)) }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Speed help").font(.label(14)).foregroundStyle(.white)
+                        Text(model.speedHelp.summary)
+                            .font(.label(12))
+                            .foregroundStyle(model.speedHelp.isEnabled ? Palette.accent : Palette.dim)
+                    }
+                }
+                .tint(Palette.accent)
+
+                if model.speedHelp.isEnabled {
+                    Picker("", selection: Binding(
+                        get: { model.speedHelp.mode },
+                        set: { model.setSpeedHelp(model.speedHelp.with(mode: $0)) }
+                    )) {
+                        Text("Auto").tag(SpeedHelp.Mode.auto)
+                        Text("Manual").tag(SpeedHelp.Mode.manual)
+                    }
+                    .pickerStyle(.segmented)
+
+                    switch model.speedHelp.mode {
+                    case .auto:
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(SpeedHelp.Profile.allCases) { profile in
+                                Button {
+                                    model.setSpeedHelp(model.speedHelp.with(profile: profile))
+                                } label: {
+                                    HStack(alignment: .top, spacing: 10) {
+                                        Image(systemName: model.speedHelp.profile == profile
+                                              ? "largecircle.fill.circle" : "circle")
+                                            .font(.system(size: 16))
+                                            .foregroundStyle(model.speedHelp.profile == profile
+                                                             ? Palette.accent : Palette.dim)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(profile.name)
+                                                .font(.label(14, weight: .medium))
+                                                .foregroundStyle(.white)
+                                            Text(profile.detail)
+                                                .font(.label(12))
+                                                .foregroundStyle(Palette.dim)
+                                        }
+                                        Spacer(minLength: 0)
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+
+                    case .manual:
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text("Never above").font(.label(14)).foregroundStyle(.white)
+                                Spacer()
+                                Text("\(Int(model.speedHelp.manualMaxMph.rounded())) mph")
+                                    .font(.readout(13))
+                                    .foregroundStyle(Palette.accent)
+                            }
+                            Slider(
+                                value: Binding(
+                                    get: { model.speedHelp.manualMaxMph },
+                                    set: { model.setSpeedHelp(model.speedHelp.with(manualMaxMph: $0)) }
+                                ),
+                                in: 15...85,
+                                step: 5
+                            )
+                            .tint(Palette.accent)
+                            Text("The road still applies. A 30 limit stays a 30 limit.")
+                                .font(.label(12))
+                                .foregroundStyle(Palette.dim)
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
         }
     }
 

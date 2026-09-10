@@ -163,6 +163,7 @@ actor SimulationEngine {
                 controls: payload.controls,
                 persona: persona,
                 mode: payload.mode,
+                speedHelp: SpeedHelp.load(),
                 seed: payload.seed
             )
             engine = MotionEngine(
