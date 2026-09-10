@@ -246,3 +246,80 @@ impl isideload::anisette::AnisetteProvider for Identified {
         self.inner.needs_provisioning()
     }
 }
+
+// MARK: - Telling Apple the truth
+
+/// The identity of the machine this is actually running on.
+///
+/// The string Apple is shown names a Mac model, a macOS build and an Xcode
+/// version. The signing library has one compiled in, so every install of every
+/// tool built on it sends the same three values, which is precisely what makes
+/// them easy to refuse in one go: block that string and the whole ecosystem
+/// stops at once, which is what happened.
+///
+/// A Mac already knows its own answers, and they are true. Reading them means
+/// no two machines send the same thing, and there is nothing shared left to
+/// block. On Windows there is no Mac to ask, so the library's own value stands
+/// and the box on the sign-in screen is the way out.
+#[cfg(target_os = "macos")]
+pub fn host_client_info() -> Option<String> {
+    fn ask(program: &str, args: &[&str]) -> Option<String> {
+        let output = std::process::Command::new(program).args(args).output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if value.is_empty() { None } else { Some(value) }
+    }
+
+    let model = ask("sysctl", &["-n", "hw.model"])?;
+    let version = ask("sw_vers", &["-productVersion"])?;
+    let build = ask("sw_vers", &["-buildVersion"])?;
+
+    // Xcode's own build number, which is what the Xcode part of the string is.
+    // Not being installed is normal and not a reason to give up on the rest.
+    let xcode = xcode_build().unwrap_or_else(|| "24959".to_string());
+
+    Some(format!(
+        "<{model}> <macOS;{version};{build}> <com.apple.AuthKit/1 (com.apple.dt.Xcode/{xcode})>"
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn xcode_build() -> Option<String> {
+    let candidates = [
+        "/Applications/Xcode.app/Contents/version.plist",
+        "/Applications/Xcode-beta.app/Contents/version.plist",
+    ];
+    for path in candidates {
+        let Ok(value) = plist::from_file::<_, plist::Value>(path) else {
+            continue;
+        };
+        let dictionary = value.as_dictionary()?;
+        if let Some(build) = dictionary.get("CFBundleVersion") {
+            if let Some(text) = build.as_string() {
+                return Some(text.to_string());
+            }
+            if let Some(number) = build.as_signed_integer() {
+                return Some(number.to_string());
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn host_client_info() -> Option<String> {
+    None
+}
+
+/// What Apple will be told, given what has been configured.
+pub fn client_info(config: &Config) -> Option<String> {
+    if let Some(chosen) = config.client_info.as_deref() {
+        let trimmed = chosen.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    host_client_info()
+}

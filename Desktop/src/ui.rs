@@ -588,10 +588,23 @@ impl Installer {
 
                 ui.add_space(14.0);
                 ui.label(
-                    RichText::new("Apple is also told what kind of machine is asking. It stops accepting particular answers from time to time, and when it does, every app that installs without the App Store fails the same morning. If somebody has published a replacement, it goes here.")
+                    RichText::new("Apple is also told what kind of machine is asking. On a Mac, Cloak answers with this machine's real model, macOS build and Xcode version, which is both true and unlike anybody else's. Leave this empty unless somebody has published something specific to use instead.")
                         .size(12.5)
                         .color(skin::SECOND),
                 );
+
+                // Showing the value takes the mystery out of the box: it is
+                // plainly this machine, and it is obvious what shape a
+                // replacement should be.
+                if let Some(current) = crate::anisette::client_info(&self.config) {
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(format!("Currently sending: {current}"))
+                            .size(11.5)
+                            .color(skin::TERTIARY),
+                    );
+                }
+
                 ui.add_space(10.0);
                 let identity = ui.add(
                     egui::TextEdit::singleline(&mut self.client_info)

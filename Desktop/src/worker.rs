@@ -339,7 +339,11 @@ async fn install(
         .set_url(&anisette_url)
         .set_serial_number("2".to_string());
 
-    let anisette = crate::anisette::Identified::new(provider, config.client_info.clone());
+    let identity = crate::anisette::client_info(&config);
+    if let Some(value) = &identity {
+        tracing::info!("telling Apple this machine is {value}");
+    }
+    let anisette = crate::anisette::Identified::new(provider, identity);
 
     // No time limit on the login as a whole, because a person may take minutes
     // to find the code on another device.
