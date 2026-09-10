@@ -55,6 +55,14 @@ fi
 echo "Adding targets"
 rustup target add aarch64-apple-ios "$SIM_TARGET"
 
+# Rust bakes absolute source paths into the binary as ordinary string
+# literals, for panic locations and tracing call sites. They are not debug
+# info, so stripping does not touch them, and they carry the builder's home
+# directory into every copy of the app that ships. Rewrite them at compile
+# time. trim-paths would be the tidy way to do this but it is not stable in
+# the toolchain here.
+export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=/build --remap-path-prefix=$ROOT=/src"
+
 echo "Building device slice"
 cargo build --release --lib --manifest-path "$CRATE/Cargo.toml" --target aarch64-apple-ios
 

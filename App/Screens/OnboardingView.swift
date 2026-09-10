@@ -238,7 +238,16 @@ struct OnboardingView: View {
     }
 
     private var developerImage: some View {
-        page(symbol: "arrow.down.circle", title: "Fetch the setup files") {
+        let busy: Bool = {
+            if case .working = model.imageDelivery.state { return true }
+            return false
+        }()
+        let failure: String? = {
+            if case .failed(let reason) = model.imageDelivery.state { return reason }
+            return nil
+        }()
+
+        return page(symbol: "arrow.down.circle", title: "Fetch the setup files") {
             Text("iOS keeps its location simulator behind a signed image from Apple, and will not offer the service until that image is mounted.")
             Text("Cloak downloads it now, once, and keeps it. About sixteen megabytes.")
         } actions: {
@@ -249,16 +258,32 @@ struct OnboardingView: View {
                     ProgressView(value: fraction).tint(Palette.accent)
                 }
 
+                if let failure {
+                    Text(failure)
+                        .font(.label(12))
+                        .foregroundStyle(Palette.warn)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
                 if model.hasDeveloperImage {
                     Button("Continue") { advance() }
                         .buttonStyle(PrimaryButtonStyle())
                 } else {
-                    Button("Download") {
+                    Button(failure == nil ? "Download" : "Try again") {
                         Task { await model.fetchDeveloperImage() }
                     }
                     .buttonStyle(PrimaryButtonStyle())
+                    .disabled(busy)
+                    .opacity(busy ? 0.4 : 1)
                 }
             }
+        }
+        // Nobody needs to be asked to press Download. Start as soon as the
+        // screen appears, and leave the button for a retry.
+        .task {
+            guard !model.hasDeveloperImage, model.imageDelivery.state == .idle else { return }
+            await model.fetchDeveloperImage()
         }
     }
 
@@ -314,7 +339,6 @@ struct OnboardingView: View {
         } actions: {
             VStack(spacing: Metrics.snug) {
                 liveCheck(title: "Paired with this phone", done: model.hasAnyPairing)
-                liveCheck(title: "Developer image ready", done: model.hasDeveloperImage)
 
                 Button("Open pairing again") { showsRemotePairing = true }
                     .buttonStyle(QuietButtonStyle())
@@ -330,8 +354,8 @@ struct OnboardingView: View {
 
                 Button("Continue") { advance() }
                     .buttonStyle(PrimaryButtonStyle())
-                    .disabled(!model.isSetupComplete)
-                    .opacity(model.isSetupComplete ? 1 : 0.4)
+                    .disabled(!model.hasAnyPairing)
+                    .opacity(model.hasAnyPairing ? 1 : 0.4)
             }
         }
     }

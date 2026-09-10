@@ -520,6 +520,7 @@ final class AppModel: NSObject {
     func refreshPairingState() {
         hasPairing = pairingStore.hasRecord
         hasRemotePairing = RemotePairingBackend.storedRecord != nil
+        hasDeveloperImage = DeveloperImageBundle.isPresent
     }
 
     func startTunnelOnly() async throws {
