@@ -43,6 +43,19 @@ int cloak_rp_mount(const unsigned char *image, size_t image_len,
 int cloak_rp_stop(void);
 int cloak_rp_host_start(const char *name, const char *pairing_base64, const char *alt_irk_base64);
 
+/* Renewing the signature from the phone itself. */
+int cloak_renew_start(const char *apple_id,
+                      const char *password,
+                      const char *ipa_path,
+                      const char *state_dir,
+                      const unsigned char *pairing, size_t pairing_len,
+                      const char *address,
+                      const char *device_name,
+                      const char *device_udid);
+int cloak_renew_state(char *out, size_t capacity);
+int cloak_renew_submit_code(const char *code);
+int cloak_renew_cancel(void);
+
 
 #ifdef __cplusplus
 }

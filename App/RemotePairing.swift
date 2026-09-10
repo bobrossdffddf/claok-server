@@ -36,6 +36,9 @@ final class RemotePairing {
     var detail: String?
     var note: String?
     var services: [String] = []
+    /// Set when the failure was Local Network permission, so the screen can
+    /// offer the one switch that fixes it rather than describing it.
+    var needsLocalNetwork = false
     var hostName = UIDevice.current.name.isEmpty ? "Cloak" : "Cloak on \(UIDevice.current.name)"
 
     private let advertiser = PairableHostAdvertiser()
@@ -122,6 +125,7 @@ final class RemotePairing {
         triedMount = false
         startedTunnel = false
         ignoreTunnel = false
+        needsLocalNetwork = false
         detail = nil
         note = nil
         services = []
@@ -197,11 +201,29 @@ final class RemotePairing {
         }
 
         guard let endpoint = await RemotePairingDiscovery.find() else {
-            phase = .failed("""
-                iOS is not advertising its pairing service right now.
+            // One message for three quite different problems was useless. The
+            // browser's own state says which one it is.
+            switch RemotePairingDiscovery.lastObstacle {
+            case .localNetworkDenied:
+                needsLocalNetwork = true
+                phase = .failed("""
+                    Cloak is not allowed to see this phone's own network, and iOS will not tell it where the pairing service is without that.
 
-                Check that Cloak has Local Network permission in Settings and that Wi-Fi is on, then try again.
-                """)
+                    Open Settings, tap Cloak, and turn on Local Network. Then come back and start pairing again.
+                    """)
+            case .noNetwork:
+                phase = .failed("""
+                    This phone has no Wi-Fi address, and iOS only offers its pairing service on a real network interface.
+
+                    Join a Wi-Fi network, or turn on Personal Hotspot, then try again. It can be a network with no internet at all.
+                    """)
+            default:
+                phase = .failed("""
+                    iOS is not advertising its pairing service right now.
+
+                    Make sure Wi-Fi is on and that Cloak has Local Network permission in Settings, then try again. Locking and unlocking the phone often brings it back.
+                    """)
+            }
             return
         }
 

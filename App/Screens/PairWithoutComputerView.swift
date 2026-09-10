@@ -51,6 +51,17 @@ struct PairWithoutComputerView: View {
 
                     if case .failed(let reason) = pairing.phase {
                         failureCard(reason)
+
+                        if pairing.needsLocalNetwork {
+                            Button {
+                                if let url = URL(string: UIApplication.openSettingsURLString) {
+                                    UIApplication.shared.open(url)
+                                }
+                            } label: {
+                                Label("Open Cloak's settings", systemImage: "gear")
+                            }
+                            .buttonStyle(PrimaryButtonStyle())
+                        }
                     }
 
                     actionButtons

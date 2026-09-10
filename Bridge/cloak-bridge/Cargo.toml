@@ -33,7 +33,15 @@ idevice = { version = "0.1.65", features = [
     "usbmuxd",
     "pair",
     "remote_pairing",
+    "afc",
+    "installation_proxy",
 ] }
+# The same signing library the desktop installer uses. It builds for
+# aarch64-apple-ios, which is what makes renewing on the phone possible at all.
+# keyring-storage is left off deliberately: it wants an entitlement a free
+# signature cannot carry, and the state goes in the app container instead.
+isideload = { version = "0.3.17", default-features = false, features = ["install", "tokio-mt"] }
+rootcause = "0.12"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util"] }
 plist = "1"
 serde_json = "1"

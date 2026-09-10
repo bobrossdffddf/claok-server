@@ -43,12 +43,63 @@ public enum RemotePairingDiscovery {
         )
     }
 
-    public static func find(timeout: TimeInterval = 8) async -> Endpoint? {
+    /// Why the last search came back empty, in the app's own words.
+    ///
+    /// There is no API that reports whether Local Network access was granted,
+    /// so the browser's own state is the only evidence there is. A denied
+    /// browser goes to `waiting` with a policy error rather than failing, and
+    /// telling those two apart is the difference between sending somebody to
+    /// the right switch in Settings and sending them to look at their router.
+    public enum Obstacle: Sendable, Equatable {
+        case localNetworkDenied
+        case noNetwork
+        case notAdvertising
+    }
+
+    nonisolated(unsafe) public private(set) static var lastObstacle: Obstacle?
+
+    public static func find(timeout: TimeInterval = 20) async -> Endpoint? {
+        // The first search on a new phone races the Local Network permission
+        // alert. iOS puts that alert up the moment a browser starts, the
+        // browser sees nothing while it is on screen, and a browser started
+        // before permission was granted does not always recover once it is.
+        // So: search, and if nothing comes back, throw the browser away and
+        // start a fresh one. By then the alert has been answered.
+        let halfway = max(timeout / 2, 6)
+        if let found = await browse(for: halfway) {
+            return found
+        }
+        if lastObstacle == .localNetworkDenied {
+            // A second browser will be refused exactly like the first one was.
+            return offlineEndpoint()
+        }
+        if let found = await browse(for: halfway) {
+            return found
+        }
+        return offlineEndpoint()
+    }
+
+    private static func browse(for timeout: TimeInterval) async -> Endpoint? {
         let browser = NWBrowser(for: .bonjour(type: serviceType, domain: nil), using: .tcp)
         let box = FoundEndpoints()
+        let denied = DeniedFlag()
 
         browser.browseResultsChangedHandler = { results, _ in
             for result in results { Task { await box.add(result.endpoint) } }
+        }
+        browser.stateUpdateHandler = { state in
+            switch state {
+            case .waiting(let error), .failed(let error):
+                // A refused browser reports EPERM or a policy denial rather
+                // than saying anything about permission directly.
+                let text = "\(error)".lowercased()
+                if text.contains("denied") || text.contains("eperm")
+                    || text.contains("policy") || text.contains("noauth") {
+                    Task { await denied.set() }
+                }
+            default:
+                break
+            }
         }
         browser.start(queue: .global())
 
@@ -56,11 +107,19 @@ public enum RemotePairingDiscovery {
         var endpoints: [NWEndpoint] = []
         while endpoints.isEmpty && Date() < deadline {
             endpoints = await box.values
+            if endpoints.isEmpty, await denied.value { break }
             if endpoints.isEmpty { try? await Task.sleep(for: .milliseconds(200)) }
         }
+        let wasDenied = await denied.value
         browser.cancel()
 
-        guard !endpoints.isEmpty else { return offlineEndpoint() }
+        guard !endpoints.isEmpty else {
+            lastObstacle = wasDenied
+                ? .localNetworkDenied
+                : (hasLocalNetworkInterface ? .notAdvertising : .noNetwork)
+            return nil
+        }
+        lastObstacle = nil
 
         // Every candidate carries its own port as "host|port", because more
         // than one device on the network answers and they will not agree on a
@@ -77,7 +136,12 @@ public enum RemotePairingDiscovery {
             }
         }
 
-        guard let first = ports.first else { return offlineEndpoint() }
+        guard let first = ports.first else {
+            // Something answered the browse but would not resolve, which is
+            // not the same as nothing being there. Let the caller try again.
+            lastObstacle = .notAdvertising
+            return nil
+        }
 
         AppGroup.defaults.set(Int(first), forKey: portKey)
 
@@ -114,6 +178,12 @@ public enum RemotePairingDiscovery {
         rest.sort(by: byFamily)
 
         return Endpoint(hosts: own + rest, port: first)
+    }
+
+    private actor DeniedFlag {
+        private var flag = false
+        func set() { flag = true }
+        var value: Bool { flag }
     }
 
     struct Resolution: Sendable {
