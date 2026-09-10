@@ -202,20 +202,34 @@ pub async fn reveal_developer_mode(provider: &dyn IdeviceProvider) -> Result<(),
     result
 }
 
+/// Why iOS would not turn Developer Mode on for us.
+pub enum DevModeRefusal {
+    /// iOS refuses the remote request on a phone with a passcode, and only
+    /// the remote request. Turning the switch on by hand works normally: the
+    /// passcode is part of Apple's own documented steps, typed after the
+    /// restart to confirm.
+    PasscodeSet,
+    Other(String),
+}
+
 /// Turns Developer Mode on. The phone reboots as a result.
-pub async fn enable_developer_mode(provider: &dyn IdeviceProvider) -> Result<(), String> {
-    let mut amfi = AmfiClient::connect(provider)
-        .await
-        .map_err(|e| format!("Could not reach the security service on the iPhone: {e}"))?;
+pub async fn enable_developer_mode(provider: &dyn IdeviceProvider) -> Result<(), DevModeRefusal> {
+    let mut amfi = AmfiClient::connect(provider).await.map_err(|e| {
+        tracing::warn!("amfi connect failed while enabling: {e}");
+        DevModeRefusal::Other(format!(
+            "Could not reach the security service on the iPhone: {e}"
+        ))
+    })?;
 
     tracing::info!("asking the iPhone to turn Developer Mode on");
     amfi.enable_developer_mode().await.map_err(|e| {
-        tracing::warn!("enable failed: {e}");
         let text = e.to_string();
-        if text.contains("passcode") {
-            "iOS will not turn Developer Mode on while a passcode is set. Turn the passcode off in Settings, do this step, then put it back.".to_string()
+        if text.to_lowercase().contains("passcode") {
+            tracing::info!("iOS refused the remote enable because a passcode is set");
+            DevModeRefusal::PasscodeSet
         } else {
-            format!("The iPhone refused to turn Developer Mode on: {e}")
+            tracing::warn!("enable failed: {e}");
+            DevModeRefusal::Other(format!("The iPhone refused to turn Developer Mode on: {e}"))
         }
     })
 }

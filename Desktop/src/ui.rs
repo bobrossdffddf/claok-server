@@ -89,6 +89,9 @@ pub struct Installer {
     code: String,
     config: Config,
     revealed: bool,
+    /// iOS would not flip the switch for us, so the screen turns into
+    /// instructions instead of an error.
+    manual_dev_mode: bool,
     trusted: bool,
     last_scan: std::time::Instant,
     started_at: Option<std::time::Instant>,
@@ -115,6 +118,7 @@ impl Installer {
             code: String::new(),
             config,
             revealed: false,
+            manual_dev_mode: false,
             trusted: false,
             last_scan: std::time::Instant::now(),
             started_at: None,
@@ -157,6 +161,12 @@ impl Installer {
                     self.code.clear();
                 }
                 Event::DeveloperModeRevealed => self.revealed = true,
+                Event::DeveloperModeManual => {
+                    self.failure = None;
+                    self.revealed = true;
+                    self.manual_dev_mode = true;
+                    self.step = Step::DeveloperMode;
+                }
                 Event::Trusted(ok) => self.trusted = ok,
                 Event::Rebooting => self.step = Step::Rebooting,
                 Event::Installed => {
@@ -428,6 +438,21 @@ impl Installer {
                 "The iPhone has not trusted this computer",
                 "None of this can happen until it does. Unlock the screen, tap Trust This Computer on the phone, type its passcode, then unplug it and plug it back in.");
             ui.add_space(16.0);
+        } else if self.manual_dev_mode {
+            notice(ui, skin::ACCENT, Color32::from_rgb(236, 246, 245), icon::IPHONE,
+                "This one has to be done on the phone",
+                "iOS only refuses to be switched over remotely when a passcode is set. Doing it by hand takes four taps and the passcode stays exactly as it is.");
+            ui.add_space(16.0);
+
+            card(ui, |ui| {
+                step_line(ui, 1, "Open Settings, then Privacy & Security.");
+                step_line(ui, 2, "Under Security, turn on Developer Mode.");
+                step_line(ui, 3, "Tap Restart when it asks.");
+                step_line(ui, 4, "When it comes back, unlock it, tap Enable and type the passcode.");
+            });
+            ui.add_space(16.0);
+
+            footnote(ui, "If Developer Mode is not in that list, close Settings completely and open it again. Settings will not redraw a page it is already showing. Then come back here and press Check again.");
         } else if self.revealed {
             notice(ui, skin::GREEN, Color32::from_rgb(236, 249, 241), icon::CHECK_CIRCLE,
                 "The switch is there now",
@@ -435,7 +460,9 @@ impl Installer {
             ui.add_space(16.0);
         }
 
-        footnote(ui, "Turning it on restarts the phone, which is normal and loses nothing. If iOS refuses because a passcode is set, turn the passcode off for this one step and put it straight back.");
+        if !self.manual_dev_mode {
+            footnote(ui, "Turning it on restarts the phone, which is normal and loses nothing. If the phone has a passcode, iOS will not let this be done remotely and the screen will show you the four taps to do it yourself. The passcode stays on either way.");
+        }
     }
 
     fn rebooting(&mut self, ui: &mut egui::Ui) {
@@ -689,14 +716,31 @@ impl Installer {
             }
             Step::DeveloperMode => {
                 let udid = self.chosen.as_ref().map(|p| p.udid.clone()).unwrap_or_default();
-                if primary(ui, "Turn it on for me").clicked() {
-                    self.failure = None;
-                    self.send(Command::EnableDeveloperMode { udid: udid.clone() });
-                }
-                if secondary(ui, "It is already on").clicked() { self.step = Step::WhyAppleID; }
-                if secondary(ui, "Just reveal the switch").clicked() {
-                    self.failure = None;
-                    self.send(Command::RevealDeveloperMode { udid });
+                if self.manual_dev_mode {
+                    // Checking beats being told. A rescan reads the switch
+                    // straight off the phone and moves on by itself when it
+                    // has actually been turned on.
+                    if primary(ui, "Check again").clicked() {
+                        self.failure = None;
+                        self.send(Command::Scan);
+                    }
+                    if secondary(ui, "Skip this for now").clicked() {
+                        self.step = Step::WhyAppleID;
+                    }
+                } else {
+                    if primary(ui, "Turn it on for me").clicked() {
+                        self.failure = None;
+                        self.send(Command::EnableDeveloperMode { udid: udid.clone() });
+                    }
+                    if secondary(ui, "I will do it on the phone myself").clicked() {
+                        self.failure = None;
+                        self.manual_dev_mode = true;
+                        self.send(Command::RevealDeveloperMode { udid: udid.clone() });
+                    }
+                    if secondary(ui, "Check again").clicked() {
+                        self.failure = None;
+                        self.send(Command::Scan);
+                    }
                 }
             }
             Step::Rebooting => {

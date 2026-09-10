@@ -41,6 +41,9 @@ pub enum Event {
     Progress(f32),
     NeedTwoFactor(Box<TwoFactorCallbackParams>),
     DeveloperModeRevealed,
+    /// iOS will not do it for us on this phone, so the person has to flip the
+    /// switch themselves. Not a failure: the manual route works fine.
+    DeveloperModeManual,
     Rebooting,
     Installed,
     Failed(String),
@@ -181,9 +184,20 @@ async fn enable_developer_mode(udid: &str, events: &Events) {
     // step that makes the switch exist at all on a phone Xcode has never seen.
     let _ = device::reveal_developer_mode(&provider).await;
 
-    if let Err(message) = device::enable_developer_mode(&provider).await {
-        let _ = events.send(Event::Failed(message));
-        return;
+    match device::enable_developer_mode(&provider).await {
+        Ok(()) => {}
+        Err(device::DevModeRefusal::PasscodeSet) => {
+            // The switch is showing by now, and turning it on by hand is a
+            // supported route that works with a passcode set. Hand over
+            // rather than asking anybody to take the lock off their phone.
+            let _ = events.send(Event::DeveloperModeRevealed);
+            let _ = events.send(Event::DeveloperModeManual);
+            return;
+        }
+        Err(device::DevModeRefusal::Other(message)) => {
+            let _ = events.send(Event::Failed(message));
+            return;
+        }
     }
 
     let _ = events.send(Event::Rebooting);
