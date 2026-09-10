@@ -9,7 +9,7 @@
 //! Nothing is drawn by hand except the two things that have to move.
 
 use egui::{
-    Align, Color32, CornerRadius, FontFamily, FontId, Layout, Margin, Rect, RichText, Sense,
+    Align, Color32, CornerRadius, FontFamily, FontId, Layout, Margin, RichText, Sense,
     Stroke, TextStyle, Vec2,
 };
 use isideload::auth::apple_account::{TwoFactorCallbackParams, TwoFactorCallbackResponse};
@@ -452,7 +452,7 @@ impl Installer {
             });
             ui.add_space(16.0);
 
-            footnote(ui, "If Developer Mode is not in that list, close Settings completely and open it again. Settings will not redraw a page it is already showing. Then come back here and press Check again.");
+            footnote(ui, "If Developer Mode is not in that list, close Settings completely and open it again: Settings will not redraw a page it is already showing. This screen is watching the phone and will move on by itself the moment the switch is on, so there is nothing to press here.");
         } else if self.revealed {
             notice(ui, skin::GREEN, Color32::from_rgb(236, 249, 241), icon::CHECK_CIRCLE,
                 "The switch is there now",
@@ -467,8 +467,15 @@ impl Installer {
 
     fn rebooting(&mut self, ui: &mut egui::Ui) {
         title(ui, "Your iPhone is restarting");
-        lede(ui, "When it comes back, unlock it. It will ask whether to turn Developer Mode on, and you say yes.");
-        ui.add_space(24.0);
+        lede(ui, "This takes about a minute. Leave it plugged in. When it comes back, do these three things on the phone and this screen will move on by itself.");
+        ui.add_space(20.0);
+
+        card(ui, |ui| {
+            step_line(ui, 1, "Unlock the phone with your passcode.");
+            step_line(ui, 2, "A message asks whether to turn Developer Mode on. Tap Turn On.");
+            step_line(ui, 3, "Enter the passcode again if it asks.");
+        });
+        ui.add_space(16.0);
 
         card(ui, |ui| {
             ui.horizontal(|ui| {
@@ -717,10 +724,10 @@ impl Installer {
             Step::DeveloperMode => {
                 let udid = self.chosen.as_ref().map(|p| p.udid.clone()).unwrap_or_default();
                 if self.manual_dev_mode {
-                    // Checking beats being told. A rescan reads the switch
-                    // straight off the phone and moves on by itself when it
-                    // has actually been turned on.
-                    if primary(ui, "Check again").clicked() {
+                    // The worker is polling the phone, so this is only here for
+                    // somebody impatient. It reads the switch straight off the
+                    // phone either way.
+                    if primary(ui, "Check now").clicked() {
                         self.failure = None;
                         self.send(Command::Scan);
                     }

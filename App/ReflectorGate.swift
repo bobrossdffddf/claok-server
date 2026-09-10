@@ -1,4 +1,5 @@
 import Foundation
+import StoreKit
 import SwiftUI
 import UIKit
 import CloakKit
@@ -179,6 +180,33 @@ final class ReflectorGate {
 
     func openAppStoreForLocalDevVPN() {
         UIApplication.shared.open(Reflector.LocalDevVPN.appStoreURL)
+    }
+
+    /// Offers the App Store install sheet without leaving Cloak.
+    ///
+    /// Sending somebody out to the App Store was the worst moment in setup:
+    /// they leave, and whether they come back is anyone's guess. SKOverlay
+    /// slides the same Get button up over this app instead, so installing it
+    /// is a step in the flow rather than an errand.
+    ///
+    /// It is not guaranteed to appear, so the plain App Store link stays on
+    /// screen underneath as the way out.
+    @discardableResult
+    func presentLocalDevVPNSheet() -> Bool {
+        guard let scene = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .first(where: { $0.activationState == .foregroundActive })
+        else {
+            openAppStoreForLocalDevVPN()
+            return false
+        }
+
+        let configuration = SKOverlay.AppConfiguration(
+            appIdentifier: Reflector.LocalDevVPN.appStoreID,
+            position: .bottom
+        )
+        SKOverlay(configuration: configuration).present(in: scene)
+        return true
     }
 
     // MARK: - Waiting

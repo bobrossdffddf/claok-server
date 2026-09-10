@@ -245,6 +245,30 @@ pub async fn accept_developer_mode(provider: &dyn IdeviceProvider) -> Result<(),
         .map_err(|e| format!("The iPhone would not confirm Developer Mode: {e}"))
 }
 
+/// Waits until the phone actually reports Developer Mode as on.
+///
+/// Answering the post-restart prompt is not the same as the switch being on,
+/// and moving the installer along before it is leaves somebody looking at a
+/// screen that says the opposite of what their phone says. This asks the
+/// phone rather than assuming.
+pub async fn wait_for_developer_mode(udid: &str, seconds: u64) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+    while std::time::Instant::now() < deadline {
+        if let Ok(phones) = list_phones().await {
+            if let Some(phone) = phones.iter().find(|p| p.udid == udid) {
+                if matches!(
+                    phone.developer_mode,
+                    DeveloperMode::On | DeveloperMode::NotApplicable
+                ) {
+                    return true;
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+    false
+}
+
 /// Waits for a phone to come back after a reboot.
 pub async fn wait_for_return(udid: &str, seconds: u64) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);

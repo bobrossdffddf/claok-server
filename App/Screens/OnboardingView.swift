@@ -5,14 +5,19 @@ import CloakKit
 
 /// Setup, one small thing at a time.
 ///
-/// Deliberately more steps than strictly necessary. Each screen asks for a
-/// single action, says what will happen before it happens, and will not move on
-/// until the thing has actually happened. Length is cheaper than confusion.
+/// Every screen asks for exactly one action, names the thing to tap in the
+/// words that appear on the phone, and shows a check that goes green by itself
+/// when it has happened. Then it moves on without being asked. Nobody should
+/// have to work out whether they did it right, and nobody should have to be
+/// walked through this by a person.
 ///
-/// The route through it is not fixed. A copy installed from a computer arrives
-/// already paired, so the whole pairing chapter is dropped rather than shown
-/// and ticked off. A copy signed with a free Apple ID has no tunnel of its own
-/// and gets the LocalDevVPN step instead of the VPN prompt.
+/// There are no screens here that only explain. Those are the ones people skip,
+/// and skipping them is how somebody ends up three steps later with no idea
+/// what went wrong. Explanation rides along with the thing it explains.
+///
+/// The route is not fixed. A copy installed from a computer arrives paired, so
+/// that chapter is dropped rather than shown and ticked off. A copy signed with
+/// a paid account carries its own tunnel and never hears about the helper app.
 struct OnboardingView: View {
     @Environment(AppModel.self) private var model
 
@@ -23,17 +28,22 @@ struct OnboardingView: View {
     @State private var showsImporter = false
     @State private var glow = false
 
+    @State private var pairingBusy = false
+    @State private var pairingStage: String?
+    @State private var pairingTrouble: String?
+
     enum Step: Hashable {
         case welcome
-        case how
+        /// Installed from a computer, so pairing is already done.
         case handoff
-        case developerImage
-        case wifi
-        case pairIntro
-        case pairing
-        case tunnel
-        case localDevVPN
-        case background
+        /// Free signature: the tunnel lives in a small companion app.
+        case getTunnelApp
+        case turnTunnelOn
+        /// Paid signature: Cloak carries its own tunnel.
+        case allowTunnel
+        case trust
+        case setupFiles
+        case location
         case ready
     }
 
@@ -83,6 +93,18 @@ struct OnboardingView: View {
             guard let data = try? Data(contentsOf: url) else { return }
             Task { await model.importSetup(data: data) }
         }
+        // The whole point of the live checks: when the thing has happened, go
+        // on. Waiting for somebody to notice a tick and press Continue is one
+        // more decision than this needs.
+        .onChange(of: satisfied) { _, done in
+            guard done, advancesOnItsOwn else { return }
+            Task {
+                try? await Task.sleep(for: .milliseconds(850))
+                await MainActor.run {
+                    if satisfied, advancesOnItsOwn { advance() }
+                }
+            }
+        }
         .task {
             plan = buildPlan()
             withAnimation(.smooth(duration: 0.9)) { glow = true }
@@ -94,29 +116,42 @@ struct OnboardingView: View {
     private func buildPlan() -> [Step] {
         var steps: [Step] = [.welcome]
 
-        // Whichever app provides it, the loopback tunnel has to be running
-        // before pairing, not after. iOS will not answer a connection this
-        // phone makes to itself without it, so a pairing attempt with no
-        // tunnel stops dead no matter what else is right.
-        let reflectorStep: Step = model.reflector.provider == .localDevVPN ? .localDevVPN : .tunnel
-
-        if model.hasAnyPairing {
-            // The computer that installed Cloak handed over its pairing
-            // record and turned Developer Mode on along the way, so there is
-            // nothing to pair, no code to type, and nothing to say about a
-            // switch that is already on.
-            steps += [.handoff, reflectorStep]
+        // The tunnel first, always. Nothing else on this list can happen
+        // without it: iOS refuses a connection this phone makes to itself, and
+        // the tunnel is the only thing that gets around that.
+        if model.reflector.provider == .localDevVPN {
+            if !model.reflector.localDevVPNInstalled { steps.append(.getTunnelApp) }
+            steps.append(.turnTunnelOn)
         } else {
-            // Nobody has done any of it, so the no-computer route explains
-            // Developer Mode where it actually has to be explained.
-            steps += [.how, reflectorStep, .wifi, .pairIntro, .pairing]
+            steps.append(.allowTunnel)
         }
 
-        if !model.hasDeveloperImage {
-            steps.append(.developerImage)
-        }
-        steps += [.background, .ready]
+        steps.append(model.hasAnyPairing ? .handoff : .trust)
+
+        if !model.hasDeveloperImage { steps.append(.setupFiles) }
+        if model.locationAuthorization != .authorizedAlways { steps.append(.location) }
+
+        steps.append(.ready)
         return steps
+    }
+
+    /// Whether this screen's one job is done.
+    private var satisfied: Bool {
+        switch step {
+        case .getTunnelApp: model.reflector.localDevVPNInstalled
+        case .turnTunnelOn, .allowTunnel: model.reflector.isUp
+        case .trust: model.hasAnyPairing
+        case .setupFiles: model.hasDeveloperImage
+        case .location: model.locationAuthorization == .authorizedAlways
+        case .welcome, .handoff, .ready: false
+        }
+    }
+
+    private var advancesOnItsOwn: Bool {
+        switch step {
+        case .welcome, .handoff, .ready: false
+        default: true
+        }
     }
 
     // MARK: - Chrome
@@ -159,7 +194,7 @@ struct OnboardingView: View {
             }
             .frame(height: 4)
 
-            Text("\(index + 1) of \(max(plan.count, 1))")
+            Text("Step \(index + 1) of \(max(plan.count, 1))")
                 .font(.readout(11, weight: .medium))
                 .foregroundStyle(Palette.dim)
                 .monospacedDigit()
@@ -176,15 +211,13 @@ struct OnboardingView: View {
     private var content: some View {
         switch step {
         case .welcome: welcome
-        case .how: how
         case .handoff: handoff
-        case .developerImage: developerImage
-        case .wifi: wifi
-        case .pairIntro: pairIntro
-        case .pairing: pairing
-        case .tunnel: tunnel
-        case .localDevVPN: localDevVPN
-        case .background: backgroundStep
+        case .getTunnelApp: getTunnelApp
+        case .turnTunnelOn: turnTunnelOn
+        case .allowTunnel: allowTunnel
+        case .trust: trust
+        case .setupFiles: setupFiles
+        case .location: location
         case .ready: ready
         }
     }
@@ -193,51 +226,220 @@ struct OnboardingView: View {
 
     private var welcome: some View {
         page(symbol: "location.viewfinder", title: "Put your phone anywhere") {
-            Text("Cloak changes the location this device reports to every app on it.")
+            Text("Cloak changes the location this phone reports to every app on it.")
             if model.hasAnyPairing {
                 Text("The computer you installed from already did the hard part. Two short steps and you are running.")
             } else {
-                Text("Setup takes about five minutes and happens once. No cable, no computer, nothing jailbroken.")
+                Text("Setup takes a few minutes and happens once. Nothing is jailbroken and no cable is needed.")
+                Text("Every screen asks for one thing and tells you exactly what to tap. When it is done, it moves on by itself.")
             }
         } actions: {
-            Button("Get started") { advance() }
+            Button("Start") { advance() }
                 .buttonStyle(PrimaryButtonStyle())
-        }
-    }
-
-    private var how: some View {
-        page(symbol: "gearshape.2.fill", title: "How it works") {
-            Text("Apple ships a location simulator inside iOS for developers. It is normally driven from a Mac over a cable.")
-            Text("Cloak reaches it from the phone itself. That takes three things, and the next few screens set each one up.")
-        } actions: {
-            VStack(spacing: Metrics.tight) {
-                preview(1, "Add one free app", "LocalDevVPN, so iOS will answer the phone itself")
-                preview(2, "Pair your phone with Cloak", "A six digit code, once")
-                preview(3, "Fetch the setup files", "About sixteen megabytes, once")
-
-                Button("Makes sense") { advance() }
-                    .buttonStyle(PrimaryButtonStyle())
-                    .padding(.top, Metrics.tight)
-            }
         }
     }
 
     private var handoff: some View {
         page(symbol: "checkmark.seal.fill", title: "Already paired") {
             Text("The installer on your computer handed Cloak the key it needs, so there is no code to type and no restart to sit through.")
-            Text("One thing left to switch on, then you are done.")
         } actions: {
             VStack(spacing: Metrics.snug) {
                 liveCheck(title: "Paired with this phone", done: model.hasAnyPairing)
-                liveCheck(title: "Developer image ready", done: model.hasDeveloperImage)
-
                 Button("Continue") { advance() }
                     .buttonStyle(PrimaryButtonStyle())
             }
         }
     }
 
-    private var developerImage: some View {
+    private var getTunnelApp: some View {
+        let installed = model.reflector.localDevVPNInstalled
+
+        return page(symbol: "arrow.down.app.fill", title: "Get the free helper app") {
+            Text("iOS will not let an app reach this phone's own developer tools directly. A small free app called LocalDevVPN is what makes it possible.")
+            Text("It does that one job. Nothing is proxied and no traffic leaves this phone.")
+        } actions: {
+            VStack(spacing: Metrics.snug) {
+                liveCheck(
+                    title: installed ? "LocalDevVPN is installed" : "Not installed yet",
+                    done: installed
+                )
+
+                if !installed {
+                    Button {
+                        model.reflector.presentLocalDevVPNSheet()
+                    } label: {
+                        Label("Install it here", systemImage: "arrow.down.app")
+                    }
+                    .buttonStyle(PrimaryButtonStyle())
+
+                    tapList([
+                        "Tap Install it here. A panel slides up from the bottom.",
+                        "Tap GET, then confirm the way you normally install apps.",
+                        "Wait for it to finish. Do not open it, just come back here.",
+                    ])
+
+                    Button("Use the App Store instead") {
+                        model.reflector.openAppStoreForLocalDevVPN()
+                    }
+                    .buttonStyle(QuietButtonStyle())
+                } else {
+                    Button("Continue") { advance() }
+                        .buttonStyle(PrimaryButtonStyle())
+                }
+            }
+        }
+    }
+
+    private var turnTunnelOn: some View {
+        let running = model.reflector.isUp
+
+        return page(symbol: "shield.lefthalf.filled", title: "Switch the tunnel on") {
+            Text("One tap. Cloak opens LocalDevVPN, turns it on, and comes straight back here.")
+        } actions: {
+            VStack(spacing: Metrics.snug) {
+                liveCheck(title: running ? "Tunnel is running" : "Tunnel is off", done: running)
+
+                if !running {
+                    Button("Turn it on") {
+                        Task { _ = await model.ensureTunnelUp() }
+                    }
+                    .buttonStyle(PrimaryButtonStyle())
+
+                    tapList([
+                        "The first time only, iOS asks to add a VPN configuration.",
+                        "Tap Allow, then enter this phone's passcode.",
+                        "You will land back in Cloak on your own.",
+                    ])
+
+                    Button("It did not come back") {
+                        model.reflector.openAppStoreForLocalDevVPN()
+                    }
+                    .buttonStyle(QuietButtonStyle())
+                }
+            }
+        }
+    }
+
+    private var allowTunnel: some View {
+        let running = model.reflector.isUp
+
+        return page(symbol: "shield.lefthalf.filled", title: "Allow the tunnel") {
+            Text("iOS will not answer a connection this phone makes to itself, so Cloak loops it back through a tunnel of its own.")
+            Text("Nothing is proxied, nothing is recorded, and no traffic leaves this phone.")
+        } actions: {
+            VStack(spacing: Metrics.snug) {
+                liveCheck(title: running ? "Tunnel is running" : "Tunnel is off", done: running)
+
+                if !running {
+                    Button("Allow the tunnel") {
+                        Task { _ = await model.ensureTunnelUp() }
+                    }
+                    .buttonStyle(PrimaryButtonStyle())
+
+                    tapList([
+                        "iOS asks to add a VPN configuration.",
+                        "Tap Allow, then enter this phone's passcode.",
+                    ])
+                }
+            }
+        }
+    }
+
+    private var trust: some View {
+        let paired = model.hasAnyPairing
+
+        return page(symbol: "hand.tap.fill", title: "Tap Trust on this phone") {
+            Text("Cloak asks this phone to pair with itself. iOS puts its own alert on screen, the same one it shows when you plug into a computer.")
+        } actions: {
+            VStack(spacing: Metrics.snug) {
+                liveCheck(title: paired ? "Paired with this phone" : "Not paired yet", done: paired)
+
+                if !paired {
+                    tapList([
+                        "Tap Start below.",
+                        "An alert appears asking whether to trust this computer. Tap Trust.",
+                        "Type this phone's passcode.",
+                    ])
+
+                    if let stage = pairingStage {
+                        Text(stage)
+                            .font(.label(13))
+                            .foregroundStyle(Palette.accent)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+
+                    if let trouble = pairingTrouble {
+                        Text(trouble)
+                            .font(.label(12))
+                            .foregroundStyle(Palette.warn)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+
+                    Button(pairingBusy ? "Waiting for you" : "Start") {
+                        Task { await runPairing() }
+                    }
+                    .buttonStyle(PrimaryButtonStyle())
+                    .disabled(pairingBusy)
+                    .opacity(pairingBusy ? 0.5 : 1)
+
+                    Button("Show me the other ways") { showsRemotePairing = true }
+                        .buttonStyle(QuietButtonStyle())
+
+                    Menu {
+                        Button("Scan a QR code from a Mac") { showsScanner = true }
+                        Button("Import a file") { showsImporter = true }
+                    } label: {
+                        Text("I have a file from a computer")
+                            .font(.label(13, weight: .medium))
+                            .foregroundStyle(Palette.dim)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Pairs without leaving the screen. The sheet is still there behind "the
+    /// other ways", but nobody should have to open it for the normal case.
+    private func runPairing() async {
+        pairingBusy = true
+        pairingTrouble = nil
+        pairingStage = "Getting the tunnel ready"
+
+        guard await model.ensureTunnelUp() else {
+            pairingStage = nil
+            pairingTrouble = model.reflectorProblem
+                ?? "The tunnel is not running, and pairing cannot happen without it."
+            pairingBusy = false
+            return
+        }
+
+        let paired = await LockdownPairing.pair { progress in
+            switch progress {
+            case .idle:
+                break
+            case .connecting:
+                pairingStage = "Asking this phone to pair"
+            case .waitingForTrust:
+                pairingStage = "Look at your screen and tap Trust"
+            case .paired:
+                pairingStage = nil
+            case .failed(let reason):
+                pairingTrouble = reason
+            }
+        }
+
+        if paired {
+            pairingStage = nil
+            pairingTrouble = nil
+            model.refreshPairingState()
+        } else if pairingTrouble == nil {
+            pairingTrouble = "Pairing did not finish. Try again, or use one of the other ways below."
+        }
+        pairingBusy = false
+    }
+
+    private var setupFiles: some View {
         let busy: Bool = {
             if case .working = model.imageDelivery.state { return true }
             return false
@@ -247,9 +449,9 @@ struct OnboardingView: View {
             return nil
         }()
 
-        return page(symbol: "arrow.down.circle", title: "Fetch the setup files") {
-            Text("iOS keeps its location simulator behind a signed image from Apple, and will not offer the service until that image is mounted.")
-            Text("Cloak downloads it now, once, and keeps it. About sixteen megabytes.")
+        return page(symbol: "arrow.down.circle", title: "Get the setup files") {
+            Text("iOS keeps its location simulator behind a signed file from Apple and will not offer it until that file is loaded.")
+            Text("Cloak is downloading it now. About sixteen megabytes, once, and then never again.")
         } actions: {
             VStack(spacing: Metrics.snug) {
                 liveCheck(title: model.imageDelivery.detail, done: model.hasDeveloperImage)
@@ -264,203 +466,76 @@ struct OnboardingView: View {
                         .foregroundStyle(Palette.warn)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                }
 
-                if model.hasDeveloperImage {
-                    Button("Continue") { advance() }
-                        .buttonStyle(PrimaryButtonStyle())
-                } else {
-                    Button(failure == nil ? "Download" : "Try again") {
+                    Button("Try again") {
                         Task { await model.fetchDeveloperImage() }
                     }
                     .buttonStyle(PrimaryButtonStyle())
                     .disabled(busy)
-                    .opacity(busy ? 0.4 : 1)
+                } else if !model.hasDeveloperImage && !busy {
+                    Button("Download") {
+                        Task { await model.fetchDeveloperImage() }
+                    }
+                    .buttonStyle(PrimaryButtonStyle())
                 }
             }
         }
-        // Nobody needs to be asked to press Download. Start as soon as the
-        // screen appears, and leave the button for a retry.
         .task {
             guard !model.hasDeveloperImage, model.imageDelivery.state == .idle else { return }
             await model.fetchDeveloperImage()
         }
     }
 
-    private var wifi: some View {
-        page(symbol: "wifi", title: "Turn on Wi-Fi") {
-            Text("iOS only offers the service Cloak needs while the phone has a Wi-Fi connection.")
-            Text("It does not have to join a network, and Personal Hotspot counts. You only need it while connecting, not while a simulation runs.")
-        } actions: {
-            VStack(spacing: Metrics.snug) {
-                liveCheck(
-                    title: model.hasLocalNetwork ? "Wi-Fi is on" : "Wi-Fi is off",
-                    done: model.hasLocalNetwork
-                )
+    private var location: some View {
+        let allowed = model.locationAuthorization == .authorizedAlways
+        let refused = model.locationAuthorization == .denied
+            || model.locationAuthorization == .restricted
 
-                Button("Open Settings") {
-                    if let url = URL(string: "App-prefs:root=WIFI") {
-                        UIApplication.shared.open(url)
-                    }
-                }
-                .buttonStyle(QuietButtonStyle())
-
-                Button("Continue") { advance() }
-                    .buttonStyle(PrimaryButtonStyle())
-                    .disabled(!model.hasLocalNetwork)
-                    .opacity(model.hasLocalNetwork ? 1 : 0.4)
-            }
-        }
-    }
-
-    private var pairIntro: some View {
-        page(symbol: "iphone.radiowaves.left.and.right", title: "Now pair your phone") {
-            Text("Cloak briefly presents itself as a computer, and your phone pairs with it. Here is exactly what will happen.")
-        } actions: {
-            VStack(spacing: Metrics.tight) {
-                preview(1, "Cloak starts advertising", "Leave it open, do not close it")
-                preview(2, "You open Settings", "Privacy & Security, then Developer Mode")
-                preview(3, "Tap Cloak under Other Devices", "Then tap Pair")
-                preview(4, "Type the six digit code", "Cloak is showing it")
-
-                Button("Start pairing") {
-                    advance()
-                    showsRemotePairing = true
-                }
-                .buttonStyle(PrimaryButtonStyle())
-                .padding(.top, Metrics.tight)
-            }
-        }
-    }
-
-    private var pairing: some View {
-        page(symbol: "checkmark.shield.fill", title: "Pairing") {
-            Text("The pairing screen walks you through it. Come back when it says it is done.")
-        } actions: {
-            VStack(spacing: Metrics.snug) {
-                liveCheck(title: "Paired with this phone", done: model.hasAnyPairing)
-
-                Button("Open pairing again") { showsRemotePairing = true }
-                    .buttonStyle(QuietButtonStyle())
-
-                Menu {
-                    Button("Scan a QR code from a Mac") { showsScanner = true }
-                    Button("Import a file") { showsImporter = true }
-                } label: {
-                    Text("Other ways to set up")
-                        .font(.label(13, weight: .medium))
-                        .foregroundStyle(Palette.dim)
-                }
-
-                Button("Continue") { advance() }
-                    .buttonStyle(PrimaryButtonStyle())
-                    .disabled(!model.hasAnyPairing)
-                    .opacity(model.hasAnyPairing ? 1 : 0.4)
-            }
-        }
-    }
-
-    private var tunnel: some View {
-        page(symbol: "shield.lefthalf.filled", title: "Allow the local tunnel") {
-            Text("iOS will not answer a connection the phone makes to itself, so Cloak routes it through a loopback tunnel.")
-            Text("You will see a VPN prompt. Nothing is proxied, nothing is recorded, and no traffic leaves this phone.")
-        } actions: {
-            VStack(spacing: Metrics.snug) {
-                liveCheck(title: "Tunnel running", done: model.reflector.isUp)
-
-                Button("Allow the tunnel") {
-                    Task {
-                        _ = await model.ensureTunnelUp()
-                        if model.reflector.isUp { advance() }
-                    }
-                }
-                .buttonStyle(PrimaryButtonStyle())
-
-                Button("Skip for now") { advance() }
-                    .buttonStyle(QuietButtonStyle())
-            }
-        }
-    }
-
-    private var localDevVPN: some View {
-        let installed = model.reflector.localDevVPNInstalled
-        let running = model.reflector.isUp
-
-        return page(symbol: "shield.lefthalf.filled", title: "One free app to finish") {
-            Text("iOS refuses a connection this phone makes to itself, so it has to be looped back through a tunnel first.")
-            Text("Your copy of Cloak cannot carry that tunnel — Apple reserves it for paid developer accounts — so it uses LocalDevVPN, which is free and does exactly that one job.")
-            Text("Nothing goes over the internet through it. Install it, switch it on once, and Cloak handles the rest from then on.")
-        } actions: {
-            VStack(spacing: Metrics.snug) {
-                liveCheck(title: installed ? "LocalDevVPN installed" : "LocalDevVPN not installed yet", done: installed)
-                liveCheck(title: running ? "Tunnel running" : "Tunnel not running", done: running)
-
-                if !running {
-                    // Both buttons are always offered. iOS answers canOpenURL
-                    // from a cache that can still say "not installed" straight
-                    // after someone installs it, and a screen that only shows
-                    // the App Store button then has no way forward.
-                    if installed {
-                        Button("Turn the tunnel on") {
-                            Task { _ = await model.ensureTunnelUp() }
-                        }
-                        .buttonStyle(PrimaryButtonStyle())
-
-                        Button {
-                            model.reflector.openAppStoreForLocalDevVPN()
-                        } label: {
-                            Label("Get LocalDevVPN, free", systemImage: "arrow.down.app")
-                        }
-                        .buttonStyle(QuietButtonStyle())
-                    } else {
-                        Button {
-                            model.reflector.openAppStoreForLocalDevVPN()
-                        } label: {
-                            Label("Get LocalDevVPN, free", systemImage: "arrow.down.app")
-                        }
-                        .buttonStyle(PrimaryButtonStyle())
-
-                        Button("I have it, turn the tunnel on") {
-                            Task { _ = await model.ensureTunnelUp() }
-                        }
-                        .buttonStyle(QuietButtonStyle())
-                    }
-
-                    Text("Open LocalDevVPN once after installing and allow the VPN profile it asks for. Cloak switches it on by itself after that.")
-                        .font(.label(12))
-                        .foregroundStyle(Palette.dim)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                Button(running ? "Continue" : "Continue anyway") { advance() }
-                    .buttonStyle(running ? AnyButtonStyleBox(PrimaryButtonStyle()) : AnyButtonStyleBox(QuietButtonStyle()))
-            }
-        }
-    }
-
-    private var backgroundStep: some View {
-        page(symbol: "moon.fill", title: "Keep it running") {
-            Text("Set location access to Always and a drive carries on with your phone locked or another app open.")
+        return page(symbol: "location.fill", title: "Let Cloak use your location") {
+            Text("On Always, a drive keeps going with the phone locked or another app open.")
             Text("On While Using, the simulation freezes the moment you leave Cloak.")
         } actions: {
             VStack(spacing: Metrics.snug) {
                 liveCheck(
-                    title: model.canRunInBackground ? "Set to Always" : "Not set to Always yet",
-                    done: model.canRunInBackground
+                    title: allowed ? "Set to Always" : "Not set to Always yet",
+                    done: allowed
                 )
 
-                Button("Open Location settings") { model.openLocationSettings() }
-                    .buttonStyle(model.canRunInBackground ? AnyButtonStyleBox(QuietButtonStyle()) : AnyButtonStyleBox(PrimaryButtonStyle()))
+                if !allowed {
+                    if refused {
+                        tapList([
+                            "Tap Open Settings below.",
+                            "Tap Location.",
+                            "Tap Always.",
+                        ])
 
-                Button(model.canRunInBackground ? "Continue" : "Continue anyway") { advance() }
-                    .buttonStyle(model.canRunInBackground ? AnyButtonStyleBox(PrimaryButtonStyle()) : AnyButtonStyleBox(QuietButtonStyle()))
+                        Button("Open Settings") {
+                            if let url = URL(string: UIApplication.openSettingsURLString) {
+                                UIApplication.shared.open(url)
+                            }
+                        }
+                        .buttonStyle(PrimaryButtonStyle())
+                    } else {
+                        tapList([
+                            "Tap Allow below.",
+                            "Choose Allow While Using App first. iOS insists on that one.",
+                            "Cloak will ask again shortly. Choose Change to Always.",
+                        ])
+
+                        Button("Allow") { model.requestAlwaysLocation() }
+                            .buttonStyle(PrimaryButtonStyle())
+                    }
+
+                    Button("Skip for now") { advance() }
+                        .buttonStyle(QuietButtonStyle())
+                }
             }
         }
     }
 
     private var ready: some View {
         page(symbol: "checkmark.seal.fill", title: "You are set up") {
-            Text("Search a place and teleport straight there, or add two stops and drive between them at a believable speed.")
+            Text("Search a place and go straight there, or add two stops and drive between them at a believable speed.")
             Text("You can run this walkthrough again any time from Settings.")
         } actions: {
             Button("Open Cloak") { model.completeOnboarding() }
@@ -470,21 +545,27 @@ struct OnboardingView: View {
 
     // MARK: - Pieces
 
-    private func preview(_ number: Int, _ title: String, _ detail: String) -> some View {
-        HStack(alignment: .top, spacing: Metrics.snug) {
-            Text("\(number)")
-                .font(.readout(12, weight: .bold))
-                .foregroundStyle(Palette.accent)
-                .frame(width: 24, height: 24)
-                .background(Circle().fill(Palette.accent.opacity(0.16)))
+    /// The exact taps, in order, in the words that appear on the phone.
+    private func tapList(_ items: [String]) -> some View {
+        VStack(alignment: .leading, spacing: Metrics.tight) {
+            ForEach(Array(items.enumerated()), id: \.offset) { pair in
+                HStack(alignment: .top, spacing: Metrics.snug) {
+                    Text("\(pair.offset + 1)")
+                        .font(.readout(12, weight: .bold))
+                        .foregroundStyle(Palette.accent)
+                        .frame(width: 24, height: 24)
+                        .background(Circle().fill(Palette.accent.opacity(0.16)))
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.label(14, weight: .medium)).foregroundStyle(.white)
-                Text(detail).font(.label(12)).foregroundStyle(Palette.dim)
+                    Text(pair.element)
+                        .font(.label(14))
+                        .foregroundStyle(.white)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Spacer(minLength: 0)
+                }
             }
-            Spacer(minLength: 0)
         }
-        .padding(12)
+        .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Palette.surface.opacity(0.55), in: .rect(cornerRadius: Metrics.radius, style: .continuous))
     }

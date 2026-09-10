@@ -1,7 +1,16 @@
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
 
-Name "Cloak Installer"
+; Passed in by the build so there is one version number in this project and
+; not a second one that quietly goes stale.
+!ifndef CLOAK_VERSION
+  !define CLOAK_VERSION "0.0"
+!endif
+!ifndef CLOAK_BUILD
+  !define CLOAK_BUILD "0"
+!endif
+
+Name "Cloak Installer ${CLOAK_VERSION}"
 OutFile "..\dist\CloakInstaller-Setup.exe"
 Unicode true
 InstallDir "$LOCALAPPDATA\Cloak"
@@ -9,11 +18,11 @@ InstallDirRegKey HKCU "Software\Cloak" "InstallDir"
 RequestExecutionLevel user
 SetCompressor /SOLID lzma
 
-VIProductVersion "1.0.0.0"
+VIProductVersion "${CLOAK_VERSION}.0.0"
 VIAddVersionKey "ProductName" "Cloak Installer"
 VIAddVersionKey "FileDescription" "Puts Cloak on your iPhone and keeps it there"
-VIAddVersionKey "FileVersion" "1.0.0.0"
-VIAddVersionKey "ProductVersion" "1.0.0"
+VIAddVersionKey "FileVersion" "${CLOAK_VERSION}.0.0"
+VIAddVersionKey "ProductVersion" "${CLOAK_VERSION}"
 VIAddVersionKey "LegalCopyright" "Cloak"
 
 !define MUI_ABORTWARNING
@@ -47,7 +56,7 @@ Section "Cloak Installer" SecMain
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Cloak" \
     "DisplayIcon" "$INSTDIR\CloakInstaller.exe"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Cloak" \
-    "DisplayVersion" "1.0.0"
+    "DisplayVersion" "${CLOAK_VERSION}"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Cloak" \
     "Publisher" "Cloak"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Cloak" \
@@ -56,7 +65,39 @@ Section "Cloak Installer" SecMain
     "NoModify" 1
 
   WriteUninstaller "$INSTDIR\Uninstall.exe"
+
+  Call CheckAppleDriver
 SectionEnd
+
+; Windows cannot see an iPhone on its own. The driver arrives with Apple's
+; free Apple Devices app, or with iTunes on older machines. Every one of these
+; keys is written by one of those, so any of them means the phone will be
+; found.
+Function CheckAppleDriver
+  ClearErrors
+  ReadRegStr $0 HKLM "SOFTWARE\Apple Inc.\Apple Mobile Device Support" "InstallDir"
+  ${If} $0 != ""
+    Return
+  ${EndIf}
+
+  ClearErrors
+  ReadRegStr $0 HKLM "SOFTWARE\WOW6432Node\Apple Inc.\Apple Mobile Device Support" "InstallDir"
+  ${If} $0 != ""
+    Return
+  ${EndIf}
+
+  ClearErrors
+  ReadRegStr $0 HKLM "SYSTEM\CurrentControlSet\Services\Apple Mobile Device Service" "ImagePath"
+  ${If} $0 != ""
+    Return
+  ${EndIf}
+
+  MessageBox MB_YESNO|MB_ICONINFORMATION \
+    "One more thing.$\r$\n$\r$\nWindows needs Apple's free Apple Devices app before it can see an iPhone at all. Without it, Cloak Installer will not find your phone when you plug it in.$\r$\n$\r$\nOpen the Microsoft Store and get it now?" \
+    IDNO done
+    ExecShell "open" "ms-windows-store://search/?query=Apple%20Devices"
+  done:
+FunctionEnd
 
 Section "Uninstall"
   ; The scheduled renewal job belongs to this install, so it goes with it.

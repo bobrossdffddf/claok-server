@@ -192,6 +192,19 @@ async fn enable_developer_mode(udid: &str, events: &Events) {
             // rather than asking anybody to take the lock off their phone.
             let _ = events.send(Event::DeveloperModeRevealed);
             let _ = events.send(Event::DeveloperModeManual);
+
+            // Keep watching while they do it. The phone restarts partway
+            // through, so this has to survive it going away and coming back,
+            // and it means nobody has to press Check again.
+            let events = events.clone();
+            let udid = udid.to_string();
+            tokio::spawn(async move {
+                if device::wait_for_developer_mode(&udid, 600).await {
+                    if let Ok(phones) = device::list_phones().await {
+                        let _ = events.send(Event::Phones(phones));
+                    }
+                }
+            });
             return;
         }
         Err(device::DevModeRefusal::Other(message)) => {
@@ -212,11 +225,28 @@ async fn enable_developer_mode(udid: &str, events: &Events) {
         return;
     }
 
-    let _ = events.send(Event::Status("Confirming…".into()));
+    let _ = events.send(Event::Status("Answering the prompt on the phone".into()));
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
-    if let Ok(provider) = device::provider_for(udid).await {
-        let _ = device::accept_developer_mode(&provider).await;
+    let answered = match device::provider_for(udid).await {
+        Ok(provider) => device::accept_developer_mode(&provider).await.is_ok(),
+        Err(_) => false,
+    };
+
+    if !answered {
+        // iOS would not let us answer for them, which happens when the phone
+        // is still locked. It is one tap, so say which one.
+        tracing::info!("could not answer the Developer Mode prompt, handing over");
+        let _ = events.send(Event::DeveloperModeManual);
+    }
+
+    let _ = events.send(Event::Status("Checking the switch on the phone".into()));
+
+    // Ask the phone rather than assuming. Until it says the switch is on,
+    // nothing further in the install can work anyway.
+    if !device::wait_for_developer_mode(udid, 300).await {
+        tracing::warn!("Developer Mode still not on after the restart");
+        let _ = events.send(Event::DeveloperModeManual);
     }
 
     match device::list_phones().await {

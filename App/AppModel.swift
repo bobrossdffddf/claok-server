@@ -492,6 +492,14 @@ final class AppModel: NSObject {
         hasDeveloperImage = DeveloperImageBundle.isPresent
     }
 
+    /// Asks for Always location, which is what keeps a drive running with the
+    /// phone locked. iOS only shows the prompt once, so a second call on a
+    /// phone that already said no does nothing and the screen offers Settings.
+    func requestAlwaysLocation() {
+        locationManager.requestAlwaysAuthorization()
+        applyLocationAuthorization(locationManager.authorizationStatus)
+    }
+
     /// Brings up whichever reflector this build uses.
     @discardableResult
     func ensureTunnelUp(target: String? = nil) async -> Bool {
