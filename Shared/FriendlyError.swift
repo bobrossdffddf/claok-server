@@ -62,7 +62,9 @@ public struct FriendlyError: Sendable, Equatable {
         if text.contains("loopback tunnel is not running") || text.contains("vpn") {
             return FriendlyError(
                 headline: "The tunnel is not running",
-                advice: "Cloak needs its local tunnel to reach iOS. Approve the VPN prompt for Cloak and try again.",
+                advice: Reflector.hasBuiltInTunnel
+                    ? "Cloak needs its local tunnel to reach iOS. Approve the VPN prompt for Cloak and try again."
+                    : "Cloak reaches iOS through LocalDevVPN, a free app from the App Store. Install it, open it once and allow its VPN profile, then try again.",
                 technical: raw
             )
         }

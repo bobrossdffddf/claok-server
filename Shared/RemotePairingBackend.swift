@@ -213,8 +213,7 @@ public actor RemotePairingBackend: DeviceBackend {
         }
 
         guard reflector else {
-            throw DeviceBackendError.handshakeFailed(
-                "The loopback tunnel is not running, and iOS will not answer a connection from this phone without it. Approve the VPN profile for Cloak and try again.")
+            throw DeviceBackendError.handshakeFailed(Reflector.missingAdvice)
         }
 
         // The tunnel interface takes a moment to carry traffic after the VPN

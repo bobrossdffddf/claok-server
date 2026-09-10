@@ -29,6 +29,10 @@ struct PairWithoutComputerView: View {
                         waitingCard
                     }
 
+                    if case .needsTunnel = pairing.phase {
+                        tunnelCard
+                    }
+
                     stepList
 
                     if let note = pairing.note, !note.isEmpty {
@@ -92,6 +96,103 @@ struct PairWithoutComputerView: View {
         }
         .padding(16)
         .background(Palette.surface, in: .rect(cornerRadius: 18, style: .continuous))
+    }
+
+    /// The one thing that stops a computer-free pairing dead.
+    ///
+    /// iOS will not answer a connection this phone makes to itself, so without
+    /// the loopback reflector there is nothing to do but get it running first.
+    /// A warning note was not enough here: it left the screen looking like it
+    /// had failed for some other reason, with no way forward.
+    private var tunnelCard: some View {
+        let helperApp = model.reflector.provider == .localDevVPN
+        let installed = model.reflector.localDevVPNInstalled
+        let running = model.reflector.isUp
+
+        return VStack(alignment: .leading, spacing: 12) {
+            Eyebrow(text: "One thing first")
+
+            Text(helperApp
+                 ? "iOS refuses a connection this phone makes to itself, so it has to be looped back through a tunnel. Your copy of Cloak cannot carry that tunnel, because Apple reserves it for paid developer accounts, so it uses LocalDevVPN. That app is free, it does this one job, and nothing goes over the internet through it."
+                 : "iOS refuses a connection this phone makes to itself, so Cloak loops it back through its own tunnel. Nothing is proxied, nothing is recorded, and no traffic leaves this phone.")
+                .font(.label(13))
+                .foregroundStyle(Palette.dim)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if helperApp {
+                tunnelCheck(installed ? "LocalDevVPN installed" : "LocalDevVPN not installed yet", done: installed)
+            }
+            tunnelCheck(running ? "Tunnel running" : "Tunnel not running", done: running)
+
+            // Both buttons are always offered when a helper app is involved.
+            // iOS answers canOpenURL from a cache that can still say "not
+            // installed" right after someone installs it, so gating on that
+            // alone can strand them on a screen with no way forward.
+            if helperApp && !installed {
+                Button {
+                    model.reflector.openAppStoreForLocalDevVPN()
+                } label: {
+                    Label("Get LocalDevVPN, free", systemImage: "arrow.down.app")
+                }
+                .buttonStyle(PrimaryButtonStyle())
+
+                Button("I have it, turn the tunnel on") {
+                    Task { await startTunnelThenPair() }
+                }
+                .buttonStyle(QuietButtonStyle())
+            } else {
+                Button("Turn the tunnel on") {
+                    Task { await startTunnelThenPair() }
+                }
+                .buttonStyle(PrimaryButtonStyle())
+
+                if helperApp {
+                    Button {
+                        model.reflector.openAppStoreForLocalDevVPN()
+                    } label: {
+                        Label("Get LocalDevVPN, free", systemImage: "arrow.down.app")
+                    }
+                    .buttonStyle(QuietButtonStyle())
+                }
+            }
+
+            if helperApp {
+                Text("Open LocalDevVPN once after installing and allow the VPN profile it asks for. Cloak switches it on by itself from then on.")
+                    .font(.label(12))
+                    .foregroundStyle(Palette.dim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Button("Try pairing without it") {
+                Task { await pairing.begin(ignoringTunnel: true) }
+            }
+            .buttonStyle(QuietButtonStyle(tint: Palette.dim))
+        }
+        .padding(16)
+        .background(Palette.warn.opacity(0.07), in: .rect(cornerRadius: 18, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(Palette.warn.opacity(0.3), lineWidth: 1)
+        )
+    }
+
+    /// Brings the reflector up and, if that worked, carries straight on rather
+    /// than making the user find the start button again.
+    private func startTunnelThenPair() async {
+        guard await model.ensureTunnelUp() else { return }
+        await pairing.begin()
+    }
+
+    private func tunnelCheck(_ title: String, done: Bool) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: done ? "checkmark.circle.fill" : "circle.dotted")
+                .font(.system(size: 15))
+                .foregroundStyle(done ? Palette.ok : Palette.dim)
+            Text(title)
+                .font(.label(13))
+                .foregroundStyle(done ? .white : Palette.dim)
+            Spacer(minLength: 0)
+        }
     }
 
     private var waitingCard: some View {
@@ -271,7 +372,7 @@ struct PairWithoutComputerView: View {
     private func stageState(_ index: Int) -> StepState {
         let current: Int
         switch pairing.phase {
-        case .idle, .failed: current = 0
+        case .idle, .failed, .needsTunnel: current = 0
         case .advertising: current = 1
         case .deviceConnected: current = 2
         case .showPin, .enterPin: current = 3
@@ -338,7 +439,7 @@ struct PairWithoutComputerView: View {
     private var startTitle: String {
         switch pairing.phase {
         case .idle: return pairing.storedRecord == nil ? "Start pairing" : "Reconnect"
-        case .failed: return "Try again"
+        case .failed, .needsTunnel: return "Try again"
         case .ready: return "Run it again"
         default: return "Working"
         }
@@ -346,7 +447,7 @@ struct PairWithoutComputerView: View {
 
     private var isBusy: Bool {
         switch pairing.phase {
-        case .idle, .failed, .ready: return false
+        case .idle, .failed, .ready, .needsTunnel: return false
         default: return true
         }
     }
@@ -354,6 +455,7 @@ struct PairWithoutComputerView: View {
     private var headerTint: Color {
         switch pairing.phase {
         case .failed: return Palette.danger
+        case .needsTunnel: return Palette.warn
         case .ready(_, let dvt): return dvt ? Palette.ok : Palette.warn
         case .idle: return Palette.dim
         default: return Palette.accent
@@ -363,6 +465,7 @@ struct PairWithoutComputerView: View {
     private var headerSymbol: String {
         switch pairing.phase {
         case .failed: return "exclamationmark.triangle.fill"
+        case .needsTunnel: return "shield.lefthalf.filled"
         case .ready(_, let dvt): return dvt ? "checkmark.shield.fill" : "exclamationmark.shield.fill"
         case .showPin, .enterPin: return "number.circle.fill"
         case .advertising: return "dot.radiowaves.left.and.right"
@@ -384,6 +487,7 @@ struct PairWithoutComputerView: View {
         case .tunnelling: return "Building the tunnel"
         case .mounting: return "Mounting the developer image"
         case .ready(_, let dvt): return dvt ? "Done" : "Almost there"
+        case .needsTunnel: return "The tunnel is not running"
         case .failed: return "Stopped"
         }
     }
@@ -404,6 +508,9 @@ struct PairWithoutComputerView: View {
         case .tunnelling: return "Negotiating the encrypted channel."
         case .mounting: return "This takes a minute or two. Keep Cloak open."
         case .ready: return "Cloak holds its own pairing now."
+        case .needsTunnel:
+            return model.reflectorProblem
+                ?? "Cloak needs the loopback tunnel before it can reach this phone."
         case .failed: return "See the detail below."
         }
     }

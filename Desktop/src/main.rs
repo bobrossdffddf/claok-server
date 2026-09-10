@@ -57,17 +57,52 @@ fn find_ipa(override_path: Option<PathBuf>) -> PathBuf {
     dir.join("Cloak.ipa")
 }
 
+/// Where the running log goes. Finder launched apps have no terminal, so
+/// without this there is nowhere for a failure to be read back from.
+pub fn log_file_path() -> std::path::PathBuf {
+    let base = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let dir = base.join("Library").join("Logs").join("Cloak");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("installer.log")
+}
+
+/// Appends to the log file on every write. The volume is a few lines per
+/// install, so reopening each time costs nothing and keeps the file readable
+/// even if the app is force quit.
+struct LogSink(std::path::PathBuf);
+
+impl std::io::Write for LogSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.0)?;
+        file.write_all(buf)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     let _ = rustls::crypto::ring::default_provider().install_default();
     let _ = isideload::init();
+    let log_path = log_file_path();
     tracing_subscriber::fmt()
+        .with_ansi(false)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "warn,cloak_installer=info".into()),
         )
+        .with_writer(move || LogSink(log_path.clone()))
         .init();
+    tracing::info!("Cloak Installer {} starting", env!("CARGO_PKG_VERSION"));
 
     let ipa = find_ipa(args.ipa);
 

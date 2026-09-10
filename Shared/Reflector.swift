@@ -63,6 +63,18 @@ public enum Reflector {
 
     public static var isUp: Bool { active() != .none }
 
+    /// What to tell someone when the reflector is not running.
+    ///
+    /// Which app is responsible for it depends on how this copy of Cloak was
+    /// signed, so this cannot be a fixed sentence. A sideloaded build has no
+    /// VPN profile of its own to approve, and telling someone to approve one
+    /// sends them looking for a switch that is not there.
+    public static var missingAdvice: String {
+        hasBuiltInTunnel
+            ? "The loopback tunnel is not running. iOS will not answer a connection from this phone without it, so allow the VPN prompt Cloak shows."
+            : "The loopback tunnel is not running. iOS will not answer a connection from this phone without it. Cloak uses LocalDevVPN, a free app from the App Store, to provide it."
+    }
+
     /// Whether this copy of Cloak carries its own tunnel extension.
     ///
     /// A sideloaded build has no `PlugIns/CloakTunnel.appex`, so asking the

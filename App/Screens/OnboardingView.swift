@@ -94,21 +94,23 @@ struct OnboardingView: View {
     private func buildPlan() -> [Step] {
         var steps: [Step] = [.welcome]
 
+        // Whichever app provides it, the loopback tunnel has to be running
+        // before pairing, not after. iOS will not answer a connection this
+        // phone makes to itself without it, so a pairing attempt with no
+        // tunnel stops dead no matter what else is right.
+        let reflectorStep: Step = model.reflector.provider == .localDevVPN ? .localDevVPN : .tunnel
+
         if model.hasAnyPairing {
             // The computer that installed Cloak handed over its pairing
             // record and turned Developer Mode on along the way, so there is
             // nothing to pair, no code to type, and nothing to say about a
             // switch that is already on.
-            steps.append(.handoff)
+            steps += [.handoff, reflectorStep]
         } else {
             // Nobody has done any of it, so the no-computer route explains
             // Developer Mode where it actually has to be explained.
-            steps += [.how, .wifi, .pairIntro, .pairing]
+            steps += [.how, reflectorStep, .wifi, .pairIntro, .pairing]
         }
-
-        // The tunnel comes next, because it is the one thing left that needs
-        // the user to go and get something.
-        steps.append(model.reflector.provider == .localDevVPN ? .localDevVPN : .tunnel)
 
         if !model.hasDeveloperImage {
             steps.append(.developerImage)
@@ -209,8 +211,8 @@ struct OnboardingView: View {
             Text("Cloak reaches it from the phone itself. That takes three things, and the next few screens set each one up.")
         } actions: {
             VStack(spacing: Metrics.tight) {
-                preview(1, "Pair your phone with Cloak", "A six digit code, once")
-                preview(2, "Add one free app", "LocalDevVPN, so iOS will answer the phone itself")
+                preview(1, "Add one free app", "LocalDevVPN, so iOS will answer the phone itself")
+                preview(2, "Pair your phone with Cloak", "A six digit code, once")
                 preview(3, "Fetch the setup files", "About sixteen megabytes, once")
 
                 Button("Makes sense") { advance() }
@@ -369,23 +371,41 @@ struct OnboardingView: View {
                 liveCheck(title: installed ? "LocalDevVPN installed" : "LocalDevVPN not installed yet", done: installed)
                 liveCheck(title: running ? "Tunnel running" : "Tunnel not running", done: running)
 
-                if !installed {
-                    Button {
-                        model.reflector.openAppStoreForLocalDevVPN()
-                    } label: {
-                        Label("Get LocalDevVPN, free", systemImage: "arrow.down.app")
-                    }
-                    .buttonStyle(PrimaryButtonStyle())
+                if !running {
+                    // Both buttons are always offered. iOS answers canOpenURL
+                    // from a cache that can still say "not installed" straight
+                    // after someone installs it, and a screen that only shows
+                    // the App Store button then has no way forward.
+                    if installed {
+                        Button("Turn the tunnel on") {
+                            Task { _ = await model.ensureTunnelUp() }
+                        }
+                        .buttonStyle(PrimaryButtonStyle())
 
-                    Text("Open it once after installing and allow the VPN profile it asks for. Then come back here.")
+                        Button {
+                            model.reflector.openAppStoreForLocalDevVPN()
+                        } label: {
+                            Label("Get LocalDevVPN, free", systemImage: "arrow.down.app")
+                        }
+                        .buttonStyle(QuietButtonStyle())
+                    } else {
+                        Button {
+                            model.reflector.openAppStoreForLocalDevVPN()
+                        } label: {
+                            Label("Get LocalDevVPN, free", systemImage: "arrow.down.app")
+                        }
+                        .buttonStyle(PrimaryButtonStyle())
+
+                        Button("I have it, turn the tunnel on") {
+                            Task { _ = await model.ensureTunnelUp() }
+                        }
+                        .buttonStyle(QuietButtonStyle())
+                    }
+
+                    Text("Open LocalDevVPN once after installing and allow the VPN profile it asks for. Cloak switches it on by itself after that.")
                         .font(.label(12))
                         .foregroundStyle(Palette.dim)
                         .fixedSize(horizontal: false, vertical: true)
-                } else {
-                    Button("Turn the tunnel on") {
-                        Task { _ = await model.ensureTunnelUp() }
-                    }
-                    .buttonStyle(running ? AnyButtonStyleBox(QuietButtonStyle()) : AnyButtonStyleBox(PrimaryButtonStyle()))
                 }
 
                 Button(running ? "Continue" : "Continue anyway") { advance() }

@@ -7,7 +7,10 @@ use std::sync::Arc;
 use isideload::{
     anisette::remote_v3::RemoteV3AnisetteProvider,
     auth::apple_account::{AppleAccount, TwoFactorCallbackParams, TwoFactorCallbackResponse},
-    dev::{developer_session::DeveloperSession, devices::DevicesApi},
+    dev::{
+        certificates::CertificatesApi, developer_session::DeveloperSession, devices::DevicesApi,
+        teams::DeveloperTeam,
+    },
     sideload::{builder::MaxCertsBehavior, install::install_app as install_signed, SideloaderBuilder, TeamSelection},
     util::device::IdeviceInfo,
 };
@@ -249,6 +252,7 @@ async fn install(
     // about that and nothing to explain: throw the stale state away and ask
     // Apple for a fresh certificate.
     let mut attempt = 0u8;
+    let mut cleared: Option<usize> = None;
     let (signed, team) = loop {
         attempt += 1;
 
@@ -275,6 +279,17 @@ async fn install(
             .get_team()
             .await
             .map_err(|e| format!("Apple would not say which developer team you are on: {e}"))?;
+
+        // On a second go, clear Apple's side out before trying again. The
+        // signing library asks for the certificate list once and then revokes
+        // from that copy, so anything deleted in the meantime gets revoked
+        // twice and the second attempt is fatal. This re-asks every time.
+        if attempt > 1 {
+            let _ = events.send(Event::Status("Tidying up old certificates".to_string()));
+            let count = make_room(sideloader.get_dev_session(), &team, &machine_name()).await;
+            tracing::info!("cleared {count} certificate(s)");
+            cleared = Some(count);
+        }
 
         let info = IdeviceInfo::from_device(&provider)
             .await
@@ -316,6 +331,10 @@ async fn install(
                     ));
                     crate::state::FileStorage::new().clear();
                     continue;
+                }
+                tracing::error!("signing failed on attempt {attempt}: {text}");
+                if looks_stale(&text) {
+                    return Err(certificate_dead_end(cleared));
                 }
                 return Err(friendly_install_error(&text));
             }
@@ -382,6 +401,132 @@ async fn install(
     Ok(())
 }
 
+/// Revokes signing certificates until Apple has room for a new one.
+///
+/// Apple caps how many a developer account may hold, and hitting the cap is
+/// the normal state of affairs for anybody who has run more than one of these
+/// tools. The signing library handles that by listing the certificates once
+/// and then revoking from its copy, which breaks the moment one of them has
+/// already gone: revoking a certificate that is not there returns error 7252
+/// and takes the whole install down with it.
+///
+/// This asks Apple again before every revoke and treats a refusal as "already
+/// gone", which is what it means. Certificates this installer made itself go
+/// first, so somebody's Xcode setup survives where possible.
+async fn make_room(session: &mut DeveloperSession, team: &DeveloperTeam, ours: &str) -> usize {
+    let mut removed = 0usize;
+    let mut first_pass = true;
+    let mut tried: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for _ in 0..12 {
+        let certs = match session.list_ios_certs(team).await {
+            Ok(certs) => certs,
+            Err(error) => {
+                tracing::warn!("could not list certificates: {error}");
+                break;
+            }
+        };
+
+        if first_pass {
+            first_pass = false;
+            tracing::info!("Apple lists {} development certificate(s):", certs.len());
+            for cert in &certs {
+                let kind = cert
+                    .certificate_type
+                    .as_ref()
+                    .and_then(|t| t.name.clone())
+                    .unwrap_or_else(|| "unknown type".to_string());
+                let platform = cert
+                    .certificate_platform
+                    .clone()
+                    .or_else(|| {
+                        cert.certificate_type
+                            .as_ref()
+                            .and_then(|t| t.platform.clone())
+                    })
+                    .unwrap_or_else(|| "unstated".to_string());
+                tracing::info!(
+                    "  serial={} platform={} type={} machine={:?} status={:?}/{:?} name={:?}",
+                    cert.serial_number.clone().unwrap_or_else(|| "none".to_string()),
+                    platform,
+                    kind,
+                    cert.machine_name,
+                    cert.status,
+                    cert.status_code,
+                    cert.name,
+                );
+            }
+        }
+
+        let untried: Vec<_> = certs
+            .iter()
+            .filter(|cert| {
+                cert.serial_number
+                    .as_ref()
+                    .is_some_and(|serial| !tried.contains(serial))
+            })
+            .collect();
+
+        if untried.is_empty() {
+            break;
+        }
+
+        // Ours first, then whatever else is in the way.
+        let chosen = untried
+            .iter()
+            .find(|cert| cert.machine_name.as_deref() == Some(ours))
+            .copied()
+            .or_else(|| untried.first().copied());
+
+        let Some(cert) = chosen else { break };
+        let Some(serial) = cert.serial_number.clone() else { break };
+        tried.insert(serial.clone());
+
+        match session.revoke_development_cert(team, &serial, None).await {
+            Ok(()) => {
+                removed += 1;
+                tracing::info!("revoked certificate {serial}");
+            }
+            Err(error) => {
+                // Almost always 7252: it was already gone. Nothing to do and
+                // nothing worth telling the user about.
+                tracing::info!("certificate {serial} was already gone ({error})");
+            }
+        }
+    }
+
+    removed
+}
+
+/// The signing certificate slots are full and Apple will not let us clear them.
+///
+/// Apple allows a small, fixed number of development certificates per account.
+/// The installer clears its own out of the way automatically, but a certificate
+/// Apple lists yet refuses to revoke (usually one Xcode made under a different
+/// certificate type) can only be removed by hand.
+fn certificate_dead_end(cleared: Option<usize>) -> String {
+    let opening = match cleared {
+        Some(0) => "Apple would not let go of any of the signing certificates on your account.",
+        Some(count) => {
+            return format!(
+                "Cleared {count} old signing certificate(s), but Apple still refused to issue a \
+                 new one.\n\nOpen developer.apple.com/account/resources/certificates/list, \
+                 delete the development certificates listed there, then run this installer \
+                 again.\n\nThe full log is in Library/Logs/Cloak/installer.log inside your \
+                 home folder."
+            );
+        }
+        None => "Apple would not issue a signing certificate.",
+    };
+
+    format!(
+        "{opening}\n\nYour account has run out of signing certificate slots. Open \
+         developer.apple.com/account/resources/certificates/list, sign in, delete the \
+         development certificates listed there, then run this installer again.\n\nThe full \
+         log is in Library/Logs/Cloak/installer.log inside your home folder."
+    )
+}
+
 /// Whether a signing failure is the kind that a clean slate fixes.
 ///
 /// Apple's 7252 is "there is no certificate with that serial on this team",
@@ -390,9 +535,12 @@ async fn install(
 fn looks_stale(text: &str) -> bool {
     let lower = text.to_lowercase();
     lower.contains("7252")
+        || lower.contains("7460")
         || lower.contains("no 'ios' certificate with serial number")
         || lower.contains("failed to retrieve certificate identity")
         || lower.contains("failed to revoke development certificate")
+        || lower.contains("maximum number of certificates")
+        || lower.contains("reached max attempts to request certificate")
 }
 
 fn machine_name() -> String {

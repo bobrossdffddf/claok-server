@@ -139,11 +139,12 @@ final class ReflectorGate {
     /// else — no VPN sheet, because they approved it once when they installed
     /// LocalDevVPN.
     private func startLocalDevVPN() async -> Bool {
-        guard localDevVPNInstalled else {
-            trouble = .needsLocalDevVPN
-            isUp = false
-            return false
-        }
+        // Deliberately not gated on `localDevVPNInstalled`. iOS answers
+        // canOpenURL from a cache it does not always refresh when an app is
+        // installed while ours is running, so a false there is a hint and not
+        // a verdict; somebody who installs LocalDevVPN and comes straight back
+        // would otherwise be told forever that they had not. Opening the URL
+        // is the authoritative test, and it is what we wanted to do anyway.
 
         // If we sent the user over there a moment ago, give it time to come
         // up rather than bouncing them across again.
@@ -151,7 +152,7 @@ final class ReflectorGate {
         if since < Self.launchCooldown {
             let up = await settled(seconds: 6)
             if up { return true }
-            trouble = .localDevVPNDidNotStart
+            trouble = localDevVPNInstalled ? .localDevVPNDidNotStart : .needsLocalDevVPN
             return false
         }
 

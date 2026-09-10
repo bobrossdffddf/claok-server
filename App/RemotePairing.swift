@@ -25,6 +25,9 @@ final class RemotePairing {
         case tunnelling
         case mounting
         case ready(services: Int, hasDvt: Bool)
+        /// Stopped before it could start, because the loopback reflector is
+        /// not up and nothing downstream of it can work without it.
+        case needsTunnel
         case failed(String)
     }
 
@@ -42,6 +45,10 @@ final class RemotePairing {
     private var published = false
     private var startedTunnel = false
     private var assertion: UIBackgroundTaskIdentifier = .invalid
+
+    /// Set when the tunnel card has been shown and the user chose to go on
+    /// without it anyway.
+    private var ignoreTunnel = false
 
     var storedRecord: String? { RemotePairingBackend.storedRecord }
 
@@ -61,9 +68,10 @@ final class RemotePairing {
     /// Kept for the UI. Every supported system has a route now.
     static var isSupported: Bool { true }
 
-    func begin() async {
+    func begin(ignoringTunnel: Bool = false) async {
         stop()
         reset()
+        ignoreTunnel = ignoringTunnel
 
         if storedRecord != nil || !Self.usesPairableHost {
             // On iOS 26 the tunnel route does the pairing itself: the handshake
@@ -113,6 +121,7 @@ final class RemotePairing {
     private func reset() {
         triedMount = false
         startedTunnel = false
+        ignoreTunnel = false
         detail = nil
         note = nil
         services = []
@@ -174,8 +183,17 @@ final class RemotePairing {
         // every packet, so a connection to 10.7.0.1 arrives at the phone's own
         // stack looking like it came from another machine.
         let reflectorReady = await TunnelGate.ensureUp(target: RemotePairingDiscovery.serviceAddress())
+        if !reflectorReady && !ignoreTunnel {
+            // Carrying on without it means a socket iOS resets before a byte
+            // comes back, and a failure that reads as though pairing itself
+            // went wrong. Stop here instead, so the screen can offer the one
+            // thing that actually fixes it.
+            note = nil
+            phase = .needsTunnel
+            return
+        }
         if !reflectorReady {
-            note = "The loopback tunnel is not running. iOS will not answer a connection from this phone without it, so approve the VPN profile for Cloak."
+            note = Reflector.missingAdvice
         }
 
         guard let endpoint = await RemotePairingDiscovery.find() else {
