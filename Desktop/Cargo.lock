@@ -1104,6 +1104,7 @@ dependencies = [
 name = "cloak-installer"
 version = "1.2.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "clap",
  "directories",
@@ -1114,6 +1115,7 @@ dependencies = [
  "keyring",
  "open",
  "plist",
+ "reqwest",
  "rootcause",
  "rustls",
  "serde",

@@ -20,6 +20,13 @@ isideload = { version = "0.3", default-features = false, features = ["install", 
 rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std"] }
 # isideload's storage trait returns this error type, so implementing it needs the crate.
 rootcause = "0.12"
+# The anisette provider is a trait, so overriding one field of it means
+# implementing it, and it is an async trait.
+async-trait = "0.1"
+
+# Same feature set isideload builds reqwest with, so this reuses that copy
+# rather than compiling a second one with a different TLS backend.
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "http2", "charset"] }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

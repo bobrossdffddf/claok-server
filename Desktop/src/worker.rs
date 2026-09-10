@@ -292,62 +292,75 @@ async fn install(
         return Err(unreachable_message());
     }
 
-    step(0.06, "Reaching Apple");
+    step(0.06, "Finding a working sign-in helper");
+
+    // The helper that produces the identity Apple demands is a public server,
+    // and the signing library points at exactly one of them. When that one is
+    // down, every copy of Cloak is down, so this looks for one that is
+    // actually answering before anything is asked of Apple.
+    let config = Config::load();
+    let mut anisette_url = match crate::anisette::pick(&config).await {
+        Ok(url) => url,
+        Err(tried) => return Err(crate::anisette::none_available(&tried)),
+    };
+
     step(0.08, "Signing in with your Apple ID");
 
-    // Up to three goes, because a dropped connection or one of Apple's own 503s
-    // is not something to hand back to somebody as a stack trace and a retyped
-    // password. Only transport failures are retried: a wrong password is
-    // answered the first time and stays answered.
-    let mut account = {
-        let mut attempt = 0u8;
-        loop {
-            attempt += 1;
-
-            let two_factor = {
-                let events = events.clone();
-                let code_rx = code_rx.clone();
-                move |params: TwoFactorCallbackParams| {
-                    let events = events.clone();
-                    let code_rx = code_rx.clone();
-                    async move {
-                        let mut guard = code_rx.lock().await;
-                        while guard.try_recv().is_ok() {}
-                        let _ = events.send(Event::NeedTwoFactor(Box::new(params)));
-                        match guard.recv().await {
-                            Some(response) => Ok(response),
-                            None => Ok(TwoFactorCallbackResponse::Abort),
-                        }
-                    }
-                }
-            };
-
-            let anisette = RemoteV3AnisetteProvider::default()
-                .map_err(|e| format!("Could not start the Apple sign-in helper: {e}"))?
-                .set_serial_number("2".to_string());
-
-            // No time limit on the login as a whole, because a person may take
-            // minutes to find the code on another device.
-            match AppleAccount::builder(apple_id)
-                .anisette_provider(anisette)
-                .login(password, two_factor)
-                .await
-            {
-                Ok(account) => break account,
-                Err(error) => {
-                    let text = error.to_string();
-                    if attempt < 3 && looks_transient(&text) {
-                        tracing::warn!("sign-in attempt {attempt} dropped: {text}");
-                        let _ = events.send(Event::Status(
-                            "The connection dropped. Trying again".to_string(),
-                        ));
-                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                        continue;
-                    }
-                    tracing::error!("sign-in failed: {text}");
-                    return Err(friendly_login_error(&text));
+    // Exactly one attempt, deliberately.
+    //
+    // Apple began refusing more than one sign-in in quick succession, and the
+    // penalty is a two hour lockout on the account. Retrying automatically is
+    // therefore the worst thing this could do: it turns one failed attempt into
+    // an afternoon of not being able to try at all. Everything that can be
+    // checked without asking Apple has already been checked by this point, so
+    // if this fails it is worth telling somebody about rather than papering
+    // over.
+    let two_factor = {
+        let events = events.clone();
+        let code_rx = code_rx.clone();
+        move |params: TwoFactorCallbackParams| {
+            let events = events.clone();
+            let code_rx = code_rx.clone();
+            async move {
+                let mut guard = code_rx.lock().await;
+                while guard.try_recv().is_ok() {}
+                let _ = events.send(Event::NeedTwoFactor(Box::new(params)));
+                match guard.recv().await {
+                    Some(response) => Ok(response),
+                    None => Ok(TwoFactorCallbackResponse::Abort),
                 }
             }
+        }
+    };
+
+    let provider = RemoteV3AnisetteProvider::default()
+        .map_err(|e| format!("Could not start the Apple sign-in helper: {e}"))?
+        .set_url(&anisette_url)
+        .set_serial_number("2".to_string());
+
+    let anisette = crate::anisette::Identified::new(provider, config.client_info.clone());
+
+    // No time limit on the login as a whole, because a person may take minutes
+    // to find the code on another device.
+    let mut account = match AppleAccount::builder(apple_id)
+        .anisette_provider(anisette)
+        .login(password, two_factor)
+        .await
+    {
+        Ok(account) => {
+            // Remember the helper. One that answered a minute ago is the best
+            // guess for the next run.
+            let mut saved = Config::load();
+            if saved.anisette_last_good.as_deref() != Some(anisette_url.as_str()) {
+                saved.anisette_last_good = Some(anisette_url.clone());
+                saved.save();
+            }
+            account
+        }
+        Err(error) => {
+            let text = error.to_string();
+            tracing::error!("sign-in failed on helper {anisette_url}: {text}");
+            return Err(friendly_login_error(&text));
         }
     };
 
@@ -702,6 +715,21 @@ fn unreachable_message() -> String {
     "Cloak cannot reach Apple from this network.\n\nSigning in has to talk to apple.com, and something between this computer and Apple is blocking or dropping it. Work, school and guest networks very often do.\n\nTry again on a home network, or share your phone's internet connection and use that.".to_string()
 }
 
+/// Whether Apple rejected the request because the sign-in helper gave it
+/// something it did not like.
+///
+/// A 503 from grandslam on a request that was otherwise well formed is the
+/// signature of an anisette server handing out identity data Apple has stopped
+/// accepting. It reads as an outage but it is per-helper, so another one very
+/// often works immediately.
+fn looks_like_bad_helper(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("anisette")
+        || lower.contains("grandslam")
+        || lower.contains("503")
+        || lower.contains("temporarily unavailable")
+}
+
 /// Whether a sign-in failure was the network rather than the account.
 ///
 /// These all mean the same thing to somebody sitting in front of it, which is
@@ -721,8 +749,27 @@ fn looks_transient(text: &str) -> bool {
         || lower.contains("dns")
 }
 
+/// Whether Apple is refusing because it has seen too many attempts.
+///
+/// The lockout is measured in hours, so getting this wrong and retrying is
+/// expensive. Anything that smells like it is treated as one.
+fn looks_rate_limited(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("429")
+        || lower.contains("rate limit")
+        || lower.contains("too many")
+        || lower.contains("try again later")
+        || lower.contains("-22406")
+}
+
 fn friendly_login_error(raw: &str) -> String {
     let lower = raw.to_lowercase();
+    if looks_rate_limited(&lower) {
+        return "Apple has temporarily stopped accepting sign-ins from this computer.\n\nIt does this after repeated attempts, and it lasts about two hours. Nothing is wrong with the account and nothing needs changing. Leave it alone and try again later: signing in again now only restarts the clock.".to_string();
+    }
+    if looks_like_bad_helper(&lower) {
+        return "Apple turned this sign-in away, and not because of the password.\n\nApple periodically stops accepting the identity that sideloading tools present, and when it does every one of them breaks at the same moment. Other apps that install without the App Store will be failing right now too.\n\nThis usually clears within a day. If somebody has published a fix, the details go in the two boxes under \"Sign-in helper\" on the sign-in screen, and no new version of Cloak is needed.\n\nDo not keep retrying: Apple locks an account out for two hours after repeated attempts.".to_string();
+    }
     if lower.contains("-20101") || lower.contains("incorrect") {
         "That Apple ID and password did not match. Note that an app-specific password will not work here — use the real one.".into()
     } else if lower.contains("locked") {

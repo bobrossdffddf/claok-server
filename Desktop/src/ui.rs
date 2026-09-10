@@ -88,6 +88,10 @@ pub struct Installer {
     two_factor: Option<TwoFactorCallbackParams>,
     code: String,
     config: Config,
+    /// An Apple sign-in helper set by hand. Empty means let Cloak choose.
+    anisette_url: String,
+    client_info: String,
+    show_anisette: bool,
     revealed: bool,
     /// iOS would not flip the switch for us, so the screen turns into
     /// instructions instead of an error.
@@ -116,7 +120,10 @@ impl Installer {
             failure: None,
             two_factor: None,
             code: String::new(),
+            anisette_url: config.anisette_url.clone().unwrap_or_default(),
+            client_info: config.client_info.clone().unwrap_or_default(),
             config,
+            show_anisette: false,
             revealed: false,
             manual_dev_mode: false,
             trusted: false,
@@ -547,6 +554,61 @@ impl Installer {
             ui.add_space(8.0);
             footnote(ui, "Your real password, not an app-specific one. App-specific passwords do not work for this.");
         });
+
+
+        // Hidden until asked for, because nobody should have to know what an
+        // anisette server is. But when they are all down, and they do all go
+        // down together, this is the difference between waiting for a new build
+        // and pasting in an address that works.
+        let toggle = if self.show_anisette { "Hide" } else { "Sign-in helper" };
+        if ui.link(RichText::new(toggle).size(12.5).color(skin::SECOND)).clicked() {
+            self.show_anisette = !self.show_anisette;
+        }
+
+        if self.show_anisette {
+            ui.add_space(8.0);
+            card(ui, |ui| {
+                ui.label(
+                    RichText::new("Apple will not accept a sign-in without an identity that only a Mac can produce, so Cloak borrows one from a public helper server. It picks a working one by itself. If sign-in keeps failing when nothing else is wrong, they are probably all having a bad day, and a different address can be put here.")
+                        .size(12.5)
+                        .color(skin::SECOND),
+                );
+                ui.add_space(10.0);
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.anisette_url)
+                        .desired_width(f32::INFINITY)
+                        .margin(Margin::symmetric(10, 9))
+                        .hint_text("Leave empty to choose automatically"),
+                );
+                if response.changed() {
+                    let trimmed = self.anisette_url.trim().to_string();
+                    self.config.anisette_url = if trimmed.is_empty() { None } else { Some(trimmed) };
+                    self.config.save();
+                }
+
+                ui.add_space(14.0);
+                ui.label(
+                    RichText::new("Apple is also told what kind of machine is asking. It stops accepting particular answers from time to time, and when it does, every app that installs without the App Store fails the same morning. If somebody has published a replacement, it goes here.")
+                        .size(12.5)
+                        .color(skin::SECOND),
+                );
+                ui.add_space(10.0);
+                let identity = ui.add(
+                    egui::TextEdit::singleline(&mut self.client_info)
+                        .desired_width(f32::INFINITY)
+                        .margin(Margin::symmetric(10, 9))
+                        .hint_text("Leave empty unless told otherwise"),
+                );
+                if identity.changed() {
+                    let trimmed = self.client_info.trim().to_string();
+                    self.config.client_info = if trimmed.is_empty() { None } else { Some(trimmed) };
+                    self.config.save();
+                }
+
+                ui.add_space(12.0);
+                footnote(ui, "Apple locks an account out for about two hours after repeated sign-in attempts, so Cloak only ever tries once. Change something here before trying again rather than pressing the button twice.");
+            });
+        }
 
         ui.add_space(18.0);
 

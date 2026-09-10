@@ -17,6 +17,16 @@ pub struct Config {
     pub last_refresh: Option<chrono::DateTime<chrono::Utc>>,
     /// Whether the user asked for automatic renewal.
     pub auto_refresh: bool,
+    /// An Apple sign-in helper chosen by hand. Set only when somebody has gone
+    /// looking, and then it is used on its own rather than as a first guess.
+    pub anisette_url: Option<String>,
+    /// What Apple is told is asking: a Mac model, a macOS build and an Xcode
+    /// version, in one string. Apple rejects specific values from time to time
+    /// and every tool that shares one stops working at once, so this can be
+    /// changed without a new build. Empty means use the library's own.
+    pub client_info: Option<String>,
+    /// Whichever helper worked last time, tried first next time.
+    pub anisette_last_good: Option<String>,
 }
 
 impl Config {

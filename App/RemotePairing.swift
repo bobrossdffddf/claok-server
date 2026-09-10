@@ -44,6 +44,9 @@ final class RemotePairing {
     /// Set when the failure was Local Network permission, so the screen can
     /// offer the one switch that fixes it rather than describing it.
     var needsLocalNetwork = false
+    /// Why the direct route did not work, kept so a later failure can say that
+    /// both were tried and what each of them said.
+    var lockdownFailure: String?
     var hostName = UIDevice.current.name.isEmpty ? "Cloak" : "Cloak on \(UIDevice.current.name)"
 
     enum Route: Equatable {
@@ -103,6 +106,13 @@ final class RemotePairing {
             await connectTunnel()
             return
         }
+
+        // Why it did not work matters more than what is tried next. Without
+        // this, a failure here is invisible: the fallback runs, fails for its
+        // own unrelated reason, and reports that instead, which reads as
+        // though nothing was ever fixed.
+        let lockdownReason = note ?? "no reason given"
+        lockdownFailure = lockdownReason
 
         // Only if that could not happen at all. These both need iOS to be
         // advertising something, which is exactly the part that fails.
@@ -193,6 +203,7 @@ final class RemotePairing {
         startedTunnel = false
         ignoreTunnel = false
         needsLocalNetwork = false
+        lockdownFailure = nil
         route = .lockdown
         detail = nil
         note = nil
@@ -271,6 +282,10 @@ final class RemotePairing {
         guard let endpoint = await RemotePairingDiscovery.find() else {
             // One message for three quite different problems was useless. The
             // browser's own state says which one it is.
+            let direct = lockdownFailure.map {
+                "\n\nPairing directly with this phone was tried first and did not work: \($0)"
+            } ?? ""
+
             switch RemotePairingDiscovery.lastObstacle {
             case .localNetworkDenied:
                 needsLocalNetwork = true
@@ -278,19 +293,19 @@ final class RemotePairing {
                     Cloak is not allowed to see this phone's own network, and iOS will not tell it where the pairing service is without that.
 
                     Open Settings, tap Cloak, and turn on Local Network. Then come back and start pairing again.
-                    """)
+                    """ + direct)
             case .noNetwork:
                 phase = .failed("""
                     This phone has no Wi-Fi address, and iOS only offers its pairing service on a real network interface.
 
                     Join a Wi-Fi network, or turn on Personal Hotspot, then try again. It can be a network with no internet at all.
-                    """)
+                    """ + direct)
             default:
                 phase = .failed("""
                     iOS is not advertising its pairing service right now.
 
                     Make sure Wi-Fi is on and that Cloak has Local Network permission in Settings, then try again. Locking and unlocking the phone often brings it back.
-                    """)
+                    """ + direct)
             }
             return
         }
