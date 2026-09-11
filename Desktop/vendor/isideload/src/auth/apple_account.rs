@@ -768,7 +768,17 @@ impl AppleAccount {
     }
 
     async fn build_2fa_headers(&self, anisette_data: &AnisetteData) -> Result<HeaderMap, Report> {
-        let mut headers = anisette_data.get_header_map()?;
+        // The full set, not the three the sign-in endpoint gets away with. The
+        // sign-in endpoint carries the rest inside the request body; these
+        // endpoints have no body, so anything left out of the headers is simply
+        // absent, and Apple answers 403 with nothing in it.
+        let mut headers = HeaderMap::new();
+        for (key, value) in anisette_data.get_full_headers() {
+            headers.insert(
+                reqwest::header::HeaderName::from_bytes(key.as_bytes())?,
+                HeaderValue::from_str(&value)?,
+            );
+        }
 
         let spd = self
             .spd

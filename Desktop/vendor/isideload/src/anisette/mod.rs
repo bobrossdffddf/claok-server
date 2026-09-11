@@ -56,6 +56,26 @@ impl AnisetteData {
         ])
     }
 
+    /// Every anisette header, not just the three the sign-in endpoint needs.
+    ///
+    /// The sign-in endpoint carries most of this inside the request body, so
+    /// leaving it out of the headers costs nothing there. The two factor
+    /// endpoints have no body to put it in: headers are the only channel, and
+    /// Apple refuses the lot with a bare 403 when they are missing. That is one
+    /// cause presenting as three separate broken endpoints.
+    pub fn get_full_headers(&self) -> HashMap<String, String> {
+        let mut headers = self.get_headers();
+        headers.insert("X-Apple-I-MD-RINFO".to_string(), self.routing_info.clone());
+        headers.insert(
+            "X-Apple-I-MD-LU".to_string(),
+            self._local_user_id.clone(),
+        );
+        headers.insert("X-Apple-I-TimeZone".to_string(), "UTC".to_string());
+        headers.insert("X-Apple-Locale".to_string(), "en_US".to_string());
+        headers.insert("X-Apple-I-Client-Time".to_string(), apple_now());
+        headers
+    }
+
     pub fn get_header_map(&self) -> Result<HeaderMap, Report> {
         let headers_map = self.get_headers();
         let mut header_map = HeaderMap::new();
@@ -162,5 +182,47 @@ impl AnisetteDataGenerator {
     pub async fn get_client_info(&self) -> Result<AnisetteClientInfo, Report> {
         let provider = self.provider.read().await;
         provider.get_client_info().await
+    }
+}
+
+/// The current time the way Apple writes it: 2026-09-11T20:45:15Z.
+fn apple_now() -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let days = seconds.div_euclid(86_400);
+    let rest = seconds.rem_euclid(86_400);
+    let (hour, minute, second) = (rest / 3600, (rest % 3600) / 60, rest % 60);
+
+    // Civil date from a day count, the usual Howard Hinnant arithmetic.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::apple_now;
+
+    #[test]
+    fn it_reads_as_a_date_apple_would_accept() {
+        let now = apple_now();
+        assert_eq!(now.len(), 20, "{now}");
+        assert!(now.ends_with('Z'), "{now}");
+        assert_eq!(&now[4..5], "-", "{now}");
+        assert_eq!(&now[10..11], "T", "{now}");
+        let year: i64 = now[..4].parse().unwrap();
+        assert!(year >= 2026 && year < 2100, "{now}");
     }
 }
