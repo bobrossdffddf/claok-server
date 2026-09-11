@@ -310,9 +310,14 @@ async fn install(
 
     step(0.08, "Signing in with your Apple ID");
 
+    // Normally None, and that is the working state: the helper's own machine
+    // description goes up with the identity data it minted, which is the only
+    // combination Apple accepts. A value here is a replacement somebody typed
+    // in on purpose.
     let identity = crate::anisette::client_info(&config);
-    if let Some(value) = &identity {
-        tracing::info!("telling Apple this machine is {value}");
+    match &identity {
+        Some(value) => tracing::info!("overriding the machine Apple is told about: {value}"),
+        None => tracing::info!("letting each sign-in helper describe its own machine"),
     }
 
     // Four at most. Each one that refuses to provision is a different server

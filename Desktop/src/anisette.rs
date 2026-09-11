@@ -247,11 +247,21 @@ pub async fn pick(config: &Config) -> Result<String, Vec<String>> {
 /// different server.
 pub fn helper_was_rejected(text: &str) -> bool {
     let lower = text.to_lowercase();
-    lower.contains("-45003")
+    let provisioning_refused = lower.contains("-45003")
         || lower.contains("invalid trust key")
         || lower.contains("provisioning failed")
         || lower.contains("end provisioning error")
-        || lower.contains("failed to provision")
+        || lower.contains("failed to provision");
+
+    // Apple answers 503 on the grandslam endpoint when the identity it was
+    // handed does not hold up, and it says nothing about why. The endpoint
+    // itself answers normally at the same moment, so this is not an outage and
+    // it is not the account: it is that particular helper's identity being
+    // turned down. Another helper is a different identity and worth trying.
+    let identity_refused = lower.contains("grandslam")
+        && (lower.contains("503") || lower.contains("service temporarily unavailable"));
+
+    provisioning_refused || identity_refused
 }
 
 /// Every helper Cloak knows about refused to provision.
@@ -277,14 +287,13 @@ pub fn none_available(tried: &[String]) -> String {
 /// A helper provider whose client identity can be changed.
 ///
 /// Apple is told what kind of machine is asking, in a single header that names
-/// a Mac model, a macOS build and an Xcode version. The signing library has one
-/// of those strings compiled into it with no way to set it, and when Apple
-/// stopped accepting that exact string every tool sharing it stopped working
-/// the same morning. Nothing was wrong with anybody's account.
+/// a Mac model, a macOS build and an Xcode version, and it has to be the same
+/// machine the identity data was minted for. The helper reports both together
+/// and they already agree, so this passes the pair straight through untouched
+/// unless somebody has typed a replacement into the box on the sign-in screen.
 ///
-/// This wraps the real provider and passes everything through untouched except
-/// that one field, so the value can be changed from the settings box without
-/// waiting for a new build of Cloak, let alone a new release of the library.
+/// Overriding it blindly is what makes Apple answer 503: the identity data
+/// still describes the helper's machine and the description no longer does.
 pub struct Identified {
     inner: isideload::anisette::remote_v3::RemoteV3AnisetteProvider,
     client_info: Option<String>,
@@ -332,79 +341,28 @@ impl isideload::anisette::AnisetteProvider for Identified {
     }
 }
 
-// MARK: - Telling Apple the truth
+// MARK: - What Apple is told this machine is
 
-/// The identity of the machine this is actually running on.
+/// The machine description Apple is shown.
 ///
-/// The string Apple is shown names a Mac model, a macOS build and an Xcode
-/// version. The signing library has one compiled in, so every install of every
-/// tool built on it sends the same three values, which is precisely what makes
-/// them easy to refuse in one go: block that string and the whole ecosystem
-/// stops at once, which is what happened.
+/// This is not free-form and it is not the machine Cloak happens to be running
+/// on. The identity data that goes up alongside it is minted by the sign-in
+/// helper, which provisioned itself as one specific Mac running one specific
+/// version of macOS, and it reports that same description from its own
+/// endpoint. The two travel together and Apple checks that they agree. Send
+/// identity data minted for a 2016 MacBook Pro on macOS 13 while claiming to be
+/// a 2026 Mac on macOS 27 and Apple answers 503 with no explanation, which
+/// reads exactly like an outage and is not one.
 ///
-/// A Mac already knows its own answers, and they are true. Reading them means
-/// no two machines send the same thing, and there is nothing shared left to
-/// block. On Windows there is no Mac to ask, so the library's own value stands
-/// and the box on the sign-in screen is the way out.
-#[cfg(target_os = "macos")]
-pub fn host_client_info() -> Option<String> {
-    fn ask(program: &str, args: &[&str]) -> Option<String> {
-        let output = std::process::Command::new(program).args(args).output().ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if value.is_empty() { None } else { Some(value) }
-    }
-
-    let model = ask("sysctl", &["-n", "hw.model"])?;
-    let version = ask("sw_vers", &["-productVersion"])?;
-    let build = ask("sw_vers", &["-buildVersion"])?;
-
-    // Xcode's own build number, which is what the Xcode part of the string is.
-    // Not being installed is normal and not a reason to give up on the rest.
-    let xcode = xcode_build().unwrap_or_else(|| "24959".to_string());
-
-    Some(format!(
-        "<{model}> <macOS;{version};{build}> <com.apple.AuthKit/1 (com.apple.dt.Xcode/{xcode})>"
-    ))
-}
-
-#[cfg(target_os = "macos")]
-fn xcode_build() -> Option<String> {
-    let candidates = [
-        "/Applications/Xcode.app/Contents/version.plist",
-        "/Applications/Xcode-beta.app/Contents/version.plist",
-    ];
-    for path in candidates {
-        let Ok(value) = plist::from_file::<_, plist::Value>(path) else {
-            continue;
-        };
-        let dictionary = value.as_dictionary()?;
-        if let Some(build) = dictionary.get("CFBundleVersion") {
-            if let Some(text) = build.as_string() {
-                return Some(text.to_string());
-            }
-            if let Some(number) = build.as_signed_integer() {
-                return Some(number.to_string());
-            }
-        }
-    }
-    None
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn host_client_info() -> Option<String> {
-    None
-}
-
-/// What Apple will be told, given what has been configured.
+/// So there is deliberately no automatic value here. Left alone, the helper's
+/// own description is used and the pair matches. The box on the sign-in screen
+/// exists for the case where somebody publishes a replacement string that has
+/// to go up with a helper that is already serving the matching identity data,
+/// and it is the only thing that can override it.
 pub fn client_info(config: &Config) -> Option<String> {
-    if let Some(chosen) = config.client_info.as_deref() {
-        let trimmed = chosen.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
-        }
+    let chosen = config.client_info.as_deref()?.trim();
+    if chosen.is_empty() {
+        return None;
     }
-    host_client_info()
+    Some(chosen.to_string())
 }
