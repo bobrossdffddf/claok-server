@@ -189,6 +189,7 @@ version = "2.0.17"
 
 [dependencies.tokio]
 version = "1.49"
+features = ["time"]
 
 [dependencies.tokio-tungstenite]
 version = "0.29.0"

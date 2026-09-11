@@ -218,6 +218,10 @@ pub fn helper_broke(text: &str, url: &str) -> bool {
 /// This is not the account being locked out. No password was judged, so it
 /// costs nothing against the account, and the next helper is a different
 /// machine rather than another go at the same one.
+pub fn slow_down() -> String {
+    "Apple is asking for a slower pace and has not stopped asking.\n\nThis is not the account and not the password. Apple limits how quickly sign-in requests can arrive from one internet connection, and once it starts refusing, every further attempt keeps it refusing. Cloak already waited and tried again several times before showing you this.\n\nLeave it completely alone for ten minutes, then try once. Attempts during that time are what keep it going.\n\nIf it keeps happening, put the Mac on a phone hotspot and try once from there. That uses a different connection and will sign in immediately if the limit is the reason.".to_string()
+}
+
 pub fn identity_throttled(text: &str) -> bool {
     let lower = text.to_lowercase();
     lower.contains("429") || lower.contains("too many requests")

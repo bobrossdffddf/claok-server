@@ -24,6 +24,38 @@ pub struct GrandSlam {
     url_bag: Dictionary,
 }
 
+
+/// Apple refuses a second request that follows too closely.
+///
+/// Signing in is several requests in a row: provisioning, the challenge, then
+/// the password proof. Fired back to back they arrive within a second or two of
+/// each other and Apple's edge answers 429 to the later ones, before anything
+/// has looked at the account or the password. It is not a lockout, there is no
+/// Retry-After, and waiting hours does not help because the limit is about the
+/// spacing of requests rather than their number.
+///
+/// So every request through here waits its turn. One at a time, never closer
+/// together than the gap below, and a 429 backs off and tries again rather than
+/// failing a sign-in that is already half finished.
+const MINIMUM_GAP: std::time::Duration = std::time::Duration::from_secs(6);
+const BACKOFF: std::time::Duration = std::time::Duration::from_secs(12);
+const MAX_ATTEMPTS: u32 = 4;
+
+static LAST_REQUEST: std::sync::OnceLock<tokio::sync::Mutex<Option<std::time::Instant>>> =
+    std::sync::OnceLock::new();
+
+async fn pace() {
+    let gate = LAST_REQUEST.get_or_init(|| tokio::sync::Mutex::new(None));
+    let mut last = gate.lock().await;
+    if let Some(previous) = *last {
+        let elapsed = previous.elapsed();
+        if elapsed < MINIMUM_GAP {
+            tokio::time::sleep(MINIMUM_GAP - elapsed).await;
+        }
+    }
+    *last = Some(std::time::Instant::now());
+}
+
 impl GrandSlam {
     /// Create a new GrandSlam instance
     ///
@@ -140,13 +172,34 @@ impl GrandSlam {
         body: &Dictionary,
         additional_headers: Option<HeaderMap>,
     ) -> Result<Dictionary, Report> {
-        let resp = self
-            .post(url)?
-            .headers(additional_headers.unwrap_or_else(reqwest::header::HeaderMap::new))
-            .body(plist_to_xml_string(body))
-            .send()
-            .await
-            .context("Failed to send grandslam request")?;
+        let extra = additional_headers.unwrap_or_else(reqwest::header::HeaderMap::new);
+        let payload = plist_to_xml_string(body);
+
+        let mut attempt: u32 = 0;
+        let resp = loop {
+            attempt += 1;
+            pace().await;
+
+            let resp = self
+                .post(url)?
+                .headers(extra.clone())
+                .body(payload.clone())
+                .send()
+                .await
+                .context("Failed to send grandslam request")?;
+
+            if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt < MAX_ATTEMPTS {
+                let pause = BACKOFF * attempt;
+                warn!(
+                    "Apple asked for a slower pace, waiting {}s before retrying",
+                    pause.as_secs()
+                );
+                tokio::time::sleep(pause).await;
+                continue;
+            }
+
+            break resp;
+        };
 
         // Apple explains a refusal in the body and the headers, and throwing the
         // response away on a bad status throws that explanation away with it.

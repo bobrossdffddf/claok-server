@@ -406,13 +406,15 @@ async fn install(
                     continue;
                 }
 
-                // Apple refused the helper's machine identity for volume, not
-                // this account. No password was judged, so this costs nothing
-                // and the next helper is a different machine.
+                // A throttle is about how fast requests are arriving, not about
+                // this helper, so trying another one is the worst thing to do:
+                // it is another burst and it deepens the throttle. The pacing
+                // and backoff inside the signing library have already waited
+                // this out several times over by the time it reaches here, so
+                // stop and let things go quiet.
                 if crate::anisette::identity_throttled(&text) {
-                    tracing::warn!("Apple is throttling {helper}, trying a different one");
-                    crate::state::FileStorage::new().forget_anisette();
-                    continue;
+                    tracing::error!("Apple is still throttling after backing off");
+                    return Err(crate::anisette::slow_down());
                 }
 
                 // Apple answered, and what it refused was the identity this
