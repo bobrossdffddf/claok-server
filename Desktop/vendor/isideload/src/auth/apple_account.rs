@@ -374,14 +374,43 @@ impl AppleAccount {
             .grandslam_client
             .get_url("trustedDeviceSecondaryAuth")?;
 
-        self.grandslam_client
+        let response = self
+            .grandslam_client
             .get(&request_code_url)?
             .headers(self.build_2fa_headers(&anisette_data).await?)
             .send()
             .await
-            .context("Failed to request trusted device 2fa")?
-            .error_for_status()
-            .context("Trusted device 2FA request failed")?;
+            .context("Failed to request trusted device 2fa")?;
+
+        let status = response.status();
+        if !status.is_success() {
+            // Worth keeping rather than discarding: this endpoint answers 403
+            // with an empty body when it does not like the identity, and the
+            // headers are the only place anything is ever explained.
+            let interesting: Vec<String> = response
+                .headers()
+                .iter()
+                .filter(|(name, _)| {
+                    let name = name.as_str().to_ascii_lowercase();
+                    name.starts_with("x-apple") || name == "retry-after" || name == "location"
+                })
+                .map(|(name, value)| format!("{name}: {}", value.to_str().unwrap_or("?")))
+                .collect();
+            let body = response.text().await.unwrap_or_default();
+            let body = body.trim();
+            warn!(
+                "Asking Apple to send a code answered {status}. headers [{}] body [{}]",
+                interesting.join(", "),
+                if body.len() > 300 { &body[..300] } else { body }
+            );
+
+            // Not fatal. Apple usually pushes the code to the trusted devices
+            // as part of the sign-in itself, so this request is a nudge rather
+            // than the thing that sends it. Failing here threw away a sign-in
+            // that only needed the code typing in.
+            info!("Carrying on to ask for the code anyway");
+            return Ok(());
+        }
 
         info!("Trusted device 2FA request sent");
 
