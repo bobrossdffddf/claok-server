@@ -363,8 +363,10 @@ impl isideload::anisette::AnisetteProvider for Identified {
             let trimmed = override_value.trim();
             if !trimmed.is_empty() {
                 info.client_info = trimmed.to_string();
+                return Ok(info);
             }
         }
+        info.client_info = without_xcode(&info.client_info);
         Ok(info)
     }
 
@@ -378,6 +380,33 @@ impl isideload::anisette::AnisetteProvider for Identified {
     fn needs_provisioning(&self) -> Result<bool, rootcause::prelude::Report> {
         self.inner.needs_provisioning()
     }
+}
+
+/// The same machine description, with the claim to be Xcode taken out.
+///
+/// Apple stopped accepting this header the moment it says the request is
+/// coming from Xcode. Not a particular Xcode version, and nothing to do with
+/// the Mac or the macOS build named alongside it: the presence of the Xcode
+/// part alone is enough. Apple's edge answers 503 and the request never
+/// reaches the sign-in service at all, which is why it looked like an outage
+/// and why swapping helpers changed nothing. Every helper reports itself as
+/// Xcode, so every one of them was blocked in exactly the same way.
+///
+/// Taking that part out is enough. The Mac and the macOS build stay exactly as
+/// the helper reported them, so they still match the identity data it minted,
+/// and what is left is an ordinary AuthKit client, which Apple answers
+/// normally.
+pub fn without_xcode(value: &str) -> String {
+    let Some(start) = value.find(" (com.apple.dt.Xcode") else {
+        return value.to_string();
+    };
+    let Some(offset) = value[start..].find(')') else {
+        return value.to_string();
+    };
+    let mut out = String::with_capacity(value.len());
+    out.push_str(&value[..start]);
+    out.push_str(&value[start + offset + 1..]);
+    out
 }
 
 // MARK: - What Apple is told this machine is
@@ -404,4 +433,31 @@ pub fn client_info(config: &Config) -> Option<String> {
         return None;
     }
     Some(chosen.to_string())
+}
+
+#[cfg(test)]
+mod client_info_tests {
+    use super::without_xcode;
+
+    #[test]
+    fn the_xcode_claim_is_removed() {
+        assert_eq!(
+            without_xcode(
+                "<MacBookPro13,2> <macOS;13.1;22C65> <com.apple.AuthKit/1 (com.apple.dt.Xcode/3594.4.19)>"
+            ),
+            "<MacBookPro13,2> <macOS;13.1;22C65> <com.apple.AuthKit/1>"
+        );
+    }
+
+    #[test]
+    fn the_machine_is_left_alone() {
+        let plain = "<Mac15,7> <macOS;15.3.1;24D70> <com.apple.AuthKit/1>";
+        assert_eq!(without_xcode(plain), plain);
+    }
+
+    #[test]
+    fn nothing_is_lost_when_there_is_no_closing_bracket() {
+        let broken = "<Mac15,7> <macOS;15.3.1;24D70> <com.apple.AuthKit/1 (com.apple.dt.Xcode/9";
+        assert_eq!(without_xcode(broken), broken);
+    }
 }
