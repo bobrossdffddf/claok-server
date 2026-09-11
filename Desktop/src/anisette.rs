@@ -208,6 +208,21 @@ pub fn helper_broke(text: &str, url: &str) -> bool {
     lower.contains("/v3/get_headers") || lower.contains("/v3/client_info")
 }
 
+/// Whether Apple is throttling the identity rather than judging the account.
+///
+/// These helpers are public and every person using one shares the single
+/// machine identity it provisioned itself as. Apple meters the password step
+/// per machine, so a busy helper can sit permanently over its limit and every
+/// login through it is refused before the password is ever examined.
+///
+/// This is not the account being locked out. No password was judged, so it
+/// costs nothing against the account, and the next helper is a different
+/// machine rather than another go at the same one.
+pub fn identity_throttled(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("429") || lower.contains("too many requests")
+}
+
 /// Adds any servers the community has published since this build.
 ///
 /// Entirely optional. The built-in list is enough to sign in, and this only

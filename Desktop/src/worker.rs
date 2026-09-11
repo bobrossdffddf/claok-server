@@ -406,6 +406,15 @@ async fn install(
                     continue;
                 }
 
+                // Apple refused the helper's machine identity for volume, not
+                // this account. No password was judged, so this costs nothing
+                // and the next helper is a different machine.
+                if crate::anisette::identity_throttled(&text) {
+                    tracing::warn!("Apple is throttling {helper}, trying a different one");
+                    crate::state::FileStorage::new().forget_anisette();
+                    continue;
+                }
+
                 // Apple answered, and what it refused was the identity this
                 // helper produced. That is worth a different helper, and it is
                 // remembered so the next run does not start here again.

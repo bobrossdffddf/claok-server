@@ -10,7 +10,7 @@ use reqwest::{
 };
 use reqwest_middleware::ClientBuilder as MwClientBuilder;
 use rootcause::prelude::*;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::{SideloadError, anisette::AnisetteClientInfo, util::plist::PlistDataExtract};
 
@@ -146,9 +146,26 @@ impl GrandSlam {
             .body(plist_to_xml_string(body))
             .send()
             .await
-            .context("Failed to send grandslam request")?
-            .error_for_status()
-            .context("Received error response from grandslam")?
+            .context("Failed to send grandslam request")?;
+
+        // Apple explains a refusal in the body and the headers, and throwing the
+        // response away on a bad status throws that explanation away with it.
+        let status = resp.status();
+        if !status.is_success() {
+            let retry_after = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("none")
+                .to_string();
+            let detail = resp.text().await.unwrap_or_default();
+            let detail = detail.trim();
+            let detail = if detail.len() > 400 { &detail[..400] } else { detail };
+            warn!("grandslam refused with {status} (retry-after: {retry_after}): {detail}");
+            bail!("Received error response from grandslam: {status} (retry-after: {retry_after})");
+        }
+
+        let resp = resp
             .text()
             .await
             .context("Failed to read grandslam response as text")?;
