@@ -327,7 +327,17 @@ async fn install(
     let mut last_error = String::new();
     let mut account = None;
 
-    for (index, helper) in helpers.iter().take(4).enumerate() {
+    // Two counts, because they are not the same thing. A helper that falls over
+    // while minting the identity never reached Apple and costs nothing, so
+    // those are worth working through. An answer from Apple itself is an
+    // attempt Apple is counting, and only a handful of those are ever safe.
+    let mut apple_attempts = 0;
+
+    for (index, helper) in helpers.iter().enumerate() {
+        if apple_attempts >= 3 {
+            tracing::warn!("stopping after {apple_attempts} attempts that reached Apple");
+            break;
+        }
         if index > 0 {
             let _ = events.send(Event::Status(
                 "That sign-in helper is not working. Trying another".to_string(),
@@ -387,12 +397,27 @@ async fn install(
                 let text = error.to_string();
                 last_error = text.clone();
 
+                // The helper fell over on its own. Nothing was asked of Apple,
+                // so this is not remembered against the server either: these
+                // are volunteer boxes and a bad minute is not a dead server.
+                if crate::anisette::helper_broke(&text, helper) {
+                    tracing::warn!("{helper} failed to produce an identity, moving on");
+                    crate::state::FileStorage::new().forget_anisette();
+                    continue;
+                }
+
+                // Apple answered, and what it refused was the identity this
+                // helper produced. That is worth a different helper, and it is
+                // remembered so the next run does not start here again.
                 if crate::anisette::helper_was_rejected(&text) {
-                    tracing::warn!("Apple would not provision against {helper}, moving on");
+                    apple_attempts += 1;
+                    tracing::warn!("Apple would not accept the identity from {helper}, moving on");
                     crate::anisette::remember_rejected(helper);
                     crate::state::FileStorage::new().forget_anisette();
                     continue;
                 }
+
+                apple_attempts += 1;
 
                 // Anything else is about the account or the network, and trying
                 // another server would only spend an attempt Apple is counting.

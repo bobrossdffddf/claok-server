@@ -134,11 +134,36 @@ pub async fn healthy_candidates(config: &Config) -> Vec<String> {
 
 /// Whether a server is answering with data Apple might accept.
 ///
-/// Reachability is not enough. A server can be up and still be handing out
-/// nothing usable, which is the failure that looks like a wrong password.
-/// The `X-Apple-I-MD-M` field is the machine identity itself, so its presence
-/// is the difference between a working helper and a web server.
+/// Reachability is not enough, and neither is the front page. What matters is
+/// the one endpoint the sign-in actually depends on: the one that mints the
+/// machine identity. These are volunteer-run servers and that endpoint fails
+/// on its own, returning 502 while everything else about the server looks
+/// perfectly healthy, which is exactly the case that used to sink a sign-in
+/// after a helper had already been chosen.
+///
+/// So this asks for headers the same way the sign-in will. A server that
+/// cannot answer that is not a candidate, however well it serves its homepage.
 pub async fn healthy(url: &str, client: &reqwest::Client) -> bool {
+    let probe = client
+        .post(format!("{url}/v3/get_headers"))
+        .header("Content-Type", "application/json")
+        .body(r#"{"identifier":"AAAAAAAAAAAAAAAAAAAAAA=="}"#)
+        .timeout(Duration::from_secs(8))
+        .send()
+        .await;
+
+    match probe {
+        Ok(response) if response.status().is_success() => return true,
+        Ok(response) => {
+            tracing::info!("anisette {url}: headers endpoint answered HTTP {}", response.status());
+        }
+        Err(error) => {
+            tracing::info!("anisette {url}: headers endpoint {error}");
+        }
+    }
+
+    // Older servers predate that endpoint and still work, so they get the
+    // original check rather than being dropped for speaking an older dialect.
     let response = match client
         .get(format!("{url}/"))
         .timeout(Duration::from_secs(8))
@@ -167,6 +192,20 @@ pub async fn healthy(url: &str, client: &reqwest::Client) -> bool {
         }
         Err(_) => false,
     }
+}
+
+/// Whether the helper broke rather than Apple refusing anything.
+///
+/// A failure whose address is the helper's own is a failure that never reached
+/// Apple: the server fell over while minting the identity. That costs nothing
+/// against the account and moving to a different server is free, which is the
+/// opposite of the situation where Apple itself has answered.
+pub fn helper_broke(text: &str, url: &str) -> bool {
+    if text.contains(url) {
+        return true;
+    }
+    let lower = text.to_lowercase();
+    lower.contains("/v3/get_headers") || lower.contains("/v3/client_info")
 }
 
 /// Adds any servers the community has published since this build.
