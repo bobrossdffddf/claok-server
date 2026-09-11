@@ -753,6 +753,17 @@ impl AppleAccount {
             debug!("Selected trusted number: {}", number.number_with_dial_code);
             return Ok(LoginState::NeedsSMS2FA(number.id));
         }
+
+        // Apple refuses to list the numbers on plenty of accounts, and checking
+        // a chosen number against a list that was never allowed to arrive turns
+        // the one remaining way of getting a code into a dead end. Sending only
+        // needs the number's position, so an unlistable account can still be
+        // texted.
+        if numbers.is_empty() {
+            debug!("No list of numbers to check against, asking Apple to text number {selected_number_id}");
+            return Ok(LoginState::NeedsSMS2FA(selected_number_id));
+        }
+
         bail!("Selected trusted number ID not found in trusted numbers");
     }
 
