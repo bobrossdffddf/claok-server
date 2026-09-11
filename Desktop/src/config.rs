@@ -29,6 +29,11 @@ pub struct Config {
     /// library and the wider ecosystem both use "0"; this only exists so a
     /// value can be tried without a new build.
     pub anisette_serial: Option<String>,
+    /// Helpers Apple refused to provision against. Skipped until they are
+    /// pushed out of the list, since a rejected trust key stays rejected until
+    /// whoever runs the server replaces it.
+    #[serde(default)]
+    pub anisette_rejected: Vec<String>,
     /// Whichever helper worked last time, tried first next time.
     pub anisette_last_good: Option<String>,
 }

@@ -296,104 +296,113 @@ async fn install(
     step(0.06, "Finding a working sign-in helper");
 
     // The helper that produces the identity Apple demands is a public server,
-    // and the signing library points at exactly one of them. When that one is
-    // down, every copy of Cloak is down, so this looks for one that is
-    // actually answering before anything is asked of Apple.
+    // and each one holds a trust key it provisions with. When Apple invalidates
+    // one of those keys, every app pointed at that server stops working at the
+    // same moment, for everybody, including somebody signing in for the first
+    // time. It looks exactly like a broken account and is nothing of the sort.
+    //
+    // So this works down the list rather than betting the whole install on one.
     let config = Config::load();
-    let mut anisette_url = match crate::anisette::pick(&config).await {
-        Ok(url) => url,
-        Err(tried) => return Err(crate::anisette::none_available(&tried)),
-    };
+    let helpers = crate::anisette::healthy_candidates(&config).await;
+    if helpers.is_empty() {
+        return Err(crate::anisette::none_available(&crate::anisette::candidates(&config)));
+    }
 
     step(0.08, "Signing in with your Apple ID");
-
-    // Exactly one attempt, deliberately.
-    //
-    // Apple began refusing more than one sign-in in quick succession, and the
-    // penalty is a two hour lockout on the account. Retrying automatically is
-    // therefore the worst thing this could do: it turns one failed attempt into
-    // an afternoon of not being able to try at all. Everything that can be
-    // checked without asking Apple has already been checked by this point, so
-    // if this fails it is worth telling somebody about rather than papering
-    // over.
-    let two_factor = {
-        let events = events.clone();
-        let code_rx = code_rx.clone();
-        move |params: TwoFactorCallbackParams| {
-            let events = events.clone();
-            let code_rx = code_rx.clone();
-            async move {
-                let mut guard = code_rx.lock().await;
-                while guard.try_recv().is_ok() {}
-                let _ = events.send(Event::NeedTwoFactor(Box::new(params)));
-                match guard.recv().await {
-                    Some(response) => Ok(response),
-                    None => Ok(TwoFactorCallbackResponse::Abort),
-                }
-            }
-        }
-    };
-
-    // The provider's state has to outlive the run.
-    //
-    // Without somewhere to keep it, the helper provisions itself against Apple
-    // from scratch on every single sign-in, which is a heavyweight exchange and
-    // exactly the sort of repeated request Apple started refusing. It also
-    // meant this computer introduced itself as a different machine every time.
-    // The library warned about this in the log on every run.
-    let provider = RemoteV3AnisetteProvider::default()
-        .map_err(|e| format!("Could not start the Apple sign-in helper: {e}"))?
-        .set_url(&anisette_url)
-        .set_storage(Box::new(crate::state::FileStorage::new()))
-        // "0" is what the library and every other tool provisions with. This
-        // was on "2" for no reason anybody recorded, and an identity that
-        // differs from the whole ecosystem's is the wrong kind of unusual when
-        // Apple is being strict about identity.
-        .set_serial_number(
-            config
-                .anisette_serial
-                .clone()
-                .unwrap_or_else(|| "0".to_string()),
-        );
 
     let identity = crate::anisette::client_info(&config);
     if let Some(value) = &identity {
         tracing::info!("telling Apple this machine is {value}");
     }
-    let anisette = crate::anisette::Identified::new(provider, identity);
 
-    // No time limit on the login as a whole, because a person may take minutes
-    // to find the code on another device.
-    let mut account = match AppleAccount::builder(apple_id)
-        .anisette_provider(anisette)
-        .login(password, two_factor)
-        .await
-    {
-        Ok(account) => {
-            // Remember the helper. One that answered a minute ago is the best
-            // guess for the next run.
-            let mut saved = Config::load();
-            if saved.anisette_last_good.as_deref() != Some(anisette_url.as_str()) {
-                saved.anisette_last_good = Some(anisette_url.clone());
-                saved.save();
-            }
-            account
+    // Four at most. Each one that refuses to provision is a different server
+    // and not another go at the same thing, so this is not the repeated
+    // attempts Apple locks accounts out for. A refusal that is about the
+    // account stops the loop dead on the first one.
+    let mut last_error = String::new();
+    let mut account = None;
+
+    for (index, helper) in helpers.iter().take(4).enumerate() {
+        if index > 0 {
+            let _ = events.send(Event::Status(
+                "That sign-in helper is not working. Trying another".to_string(),
+            ));
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
-        Err(error) => {
-            let text = error.to_string();
-            tracing::error!("sign-in failed on helper {anisette_url}: {text}");
+        tracing::info!("trying sign-in helper {helper}");
 
-            // Kept state that Apple has rejected is worse than none: it would
-            // be sent again unchanged next time. Throwing it away costs one
-            // provisioning exchange on the next attempt and means that attempt
-            // is genuinely fresh rather than a repeat of this one.
-            if looks_like_bad_helper(&text) || looks_rate_limited(&text) {
-                crate::state::FileStorage::new().forget_anisette();
-                tracing::info!("cleared the stored sign-in helper state");
+        let two_factor = {
+            let events = events.clone();
+            let code_rx = code_rx.clone();
+            move |params: TwoFactorCallbackParams| {
+                let events = events.clone();
+                let code_rx = code_rx.clone();
+                async move {
+                    let mut guard = code_rx.lock().await;
+                    while guard.try_recv().is_ok() {}
+                    let _ = events.send(Event::NeedTwoFactor(Box::new(params)));
+                    match guard.recv().await {
+                        Some(response) => Ok(response),
+                        None => Ok(TwoFactorCallbackResponse::Abort),
+                    }
+                }
             }
+        };
 
-            return Err(friendly_login_error(&text));
+        let provider = RemoteV3AnisetteProvider::default()
+            .map_err(|e| format!("Could not start the Apple sign-in helper: {e}"))?
+            .set_url(helper)
+            .set_storage(Box::new(crate::state::FileStorage::new()))
+            .set_serial_number(
+                config
+                    .anisette_serial
+                    .clone()
+                    .unwrap_or_else(|| "0".to_string()),
+            );
+
+        let anisette = crate::anisette::Identified::new(provider, identity.clone());
+
+        // No time limit on the login as a whole, because a person may take
+        // minutes to find the code on another device.
+        match AppleAccount::builder(apple_id)
+            .anisette_provider(anisette)
+            .login(password, two_factor)
+            .await
+        {
+            Ok(signed_in) => {
+                let mut saved = Config::load();
+                if saved.anisette_last_good.as_deref() != Some(helper.as_str()) {
+                    saved.anisette_last_good = Some(helper.clone());
+                    saved.save();
+                }
+                account = Some(signed_in);
+                break;
+            }
+            Err(error) => {
+                let text = error.to_string();
+                last_error = text.clone();
+
+                if crate::anisette::helper_was_rejected(&text) {
+                    tracing::warn!("Apple would not provision against {helper}, moving on");
+                    crate::anisette::remember_rejected(helper);
+                    crate::state::FileStorage::new().forget_anisette();
+                    continue;
+                }
+
+                // Anything else is about the account or the network, and trying
+                // another server would only spend an attempt Apple is counting.
+                tracing::error!("sign-in failed on helper {helper}: {text}");
+                if looks_rate_limited(&text) {
+                    crate::state::FileStorage::new().forget_anisette();
+                }
+                return Err(friendly_login_error(&text));
+            }
         }
+    }
+
+    let Some(mut account) = account else {
+        tracing::error!("every helper refused: {last_error}");
+        return Err(crate::anisette::all_helpers_rejected());
     };
 
     if remember {

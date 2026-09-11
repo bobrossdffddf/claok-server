@@ -28,14 +28,23 @@ const DIRECTORY: &str = "https://servers.sidestore.io/servers.json";
 /// when it is healthy it is the best tested. The rest come from SideStore's
 /// maintained list, which exists for exactly this reason.
 pub const KNOWN: &[&str] = &[
-    "https://ani.stikstore.app",
+    // SideStore's maintained list comes first. The signing library's own
+    // default, ani.stikstore.app, is deliberately last: it is not on that list
+    // and its trust key is the one Apple invalidated, so leading with it means
+    // every install fails before anything else gets a turn.
     "https://ani.sidestore.io",
     "https://ani.sidestore.app",
+    "https://ani.sidestore.zip",
     "https://ani.846969.xyz",
     "https://ani.npeg.us",
     "https://anisette.wedotstud.io",
     "https://ani.neoarz.com",
     "https://ani.idevicehacked.com",
+    "https://ani.xu30.top",
+    "https://ani.owoellen.rocks",
+    "https://ani.jaydenha.uk",
+    "https://ani3server.fly.dev",
+    "https://ani.stikstore.app",
 ];
 
 /// Every server worth trying, best first.
@@ -66,7 +75,61 @@ pub fn candidates(config: &Config) -> Vec<String> {
     for server in KNOWN {
         push(server);
     }
-    list
+
+    drop(push);
+
+    // A helper Apple has refused to provision against is not coming back
+    // within this run, and probably not today either. Unless that leaves
+    // nothing at all, in which case trying a rejected one beats trying none.
+    let filtered: Vec<String> = list
+        .iter()
+        .filter(|entry| !config.anisette_rejected.iter().any(|bad| bad == *entry))
+        .cloned()
+        .collect();
+
+    if filtered.is_empty() { list } else { filtered }
+}
+
+/// Remembers that Apple would not provision against this one.
+pub fn remember_rejected(url: &str) {
+    let mut config = Config::load();
+    let entry = url.trim_end_matches('/').to_string();
+    if config.anisette_rejected.contains(&entry) {
+        return;
+    }
+    config.anisette_rejected.push(entry);
+    // Not a permanent blacklist. These come back when whoever runs them
+    // re-provisions, so the list is trimmed rather than grown forever.
+    while config.anisette_rejected.len() > 8 {
+        config.anisette_rejected.remove(0);
+    }
+    if config.anisette_last_good.as_deref() == Some(url) {
+        config.anisette_last_good = None;
+    }
+    config.save();
+}
+
+/// Every healthy helper, in order, so a run can work down the list.
+pub async fn healthy_candidates(config: &Config) -> Vec<String> {
+    let Ok(client) = reqwest::Client::builder()
+        .user_agent("Cloak Installer")
+        .build()
+    else {
+        return candidates(config);
+    };
+
+    let mut list = candidates(config);
+    if config.anisette_url.is_none() {
+        merge_published(&mut list, &client).await;
+    }
+
+    let mut answering = Vec::new();
+    for url in list {
+        if healthy(&url, &client).await {
+            answering.push(url);
+        }
+    }
+    answering
 }
 
 /// Whether a server is answering with data Apple might accept.
@@ -172,6 +235,28 @@ pub async fn pick(config: &Config) -> Result<String, Vec<String>> {
 
     tracing::warn!("no anisette server answered out of {}", list.len());
     Err(list)
+}
+
+/// Whether Apple refused to provision against this helper.
+///
+/// The decisive one is -45003, invalid Trust Key. Each of these servers holds
+/// an identity it provisions with, and when Apple invalidates one, every app
+/// pointed at that server stops working at the same moment, for everybody,
+/// including somebody signing in for the first time. Nothing about it is to do
+/// with the account, and no amount of waiting fixes it: the only cure is a
+/// different server.
+pub fn helper_was_rejected(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("-45003")
+        || lower.contains("invalid trust key")
+        || lower.contains("provisioning failed")
+        || lower.contains("end provisioning error")
+        || lower.contains("failed to provision")
+}
+
+/// Every helper Cloak knows about refused to provision.
+pub fn all_helpers_rejected() -> String {
+    "Apple would not accept any of the sign-in helpers.\n\nThese are public servers that produce the identity Apple insists on, and each holds a key Apple can invalidate. When that happens every app that installs without the App Store breaks at once, for everybody, including somebody signing in for the first time. Nothing is wrong with the Apple ID.\n\nCloak tried several different servers and Apple refused all of them, so this is an outage rather than a setting. It is normally fixed within a day by whoever runs them.\n\nIf somebody has published an address that works, it goes in the box under \"Sign-in helper\" on the previous screen.".to_string()
 }
 
 /// What to tell somebody when every one of them is down.
