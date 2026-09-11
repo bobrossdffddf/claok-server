@@ -436,6 +436,11 @@ async fn install(
                 if looks_rate_limited(&text) {
                     crate::state::FileStorage::new().forget_anisette();
                 }
+                // A saved password Apple has just rejected is worse than none,
+                // because it would be offered again silently on the next run.
+                if wrong_password(&text) {
+                    StoredPassword::forget(apple_id);
+                }
                 return Err(friendly_login_error(&text));
             }
         }
@@ -868,23 +873,39 @@ fn looks_transient(text: &str) -> bool {
 /// expensive. Anything that smells like it is treated as one.
 fn looks_rate_limited(text: &str) -> bool {
     let lower = text.to_lowercase();
+    // -22406 does NOT belong here. It is Apple saying the password is wrong,
+    // and treating it as a lockout told people to go away and wait two hours
+    // when what they needed to do was retype their password.
     lower.contains("429")
         || lower.contains("rate limit")
         || lower.contains("too many")
         || lower.contains("try again later")
-        || lower.contains("-22406")
+}
+
+/// Apple judged the password and it did not match.
+fn wrong_password(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("-22406")
+        || lower.contains("-20101")
+        || lower.contains("enter the correct password")
 }
 
 fn friendly_login_error(raw: &str) -> String {
     let lower = raw.to_lowercase();
+    // First, because it is the one answer that means Apple looked at the
+    // account and reached a verdict. Everything below it is about getting as
+    // far as being asked.
+    if wrong_password(&lower) {
+        return "Apple says that password is not right for this Apple ID.\n\nEverything else worked: Apple accepted the computer, accepted the Apple ID, and checked the password, so this is the password itself and nothing else.\n\nTwo things catch people out. An app-specific password will not work here, it has to be the real one. And if two-factor is on, the password still goes in this box and the six digit code is asked for separately afterwards.\n\nIf it is definitely right, sign in at appleid.apple.com once in a browser and then try here again.".to_string();
+    }
     if looks_rate_limited(&lower) {
         return "Apple has temporarily stopped accepting sign-ins from this computer.\n\nIt does this after repeated attempts, and it lasts about two hours. Nothing is wrong with the account and nothing needs changing. Leave it alone and try again later: signing in again now only restarts the clock.".to_string();
     }
     if looks_like_bad_helper(&lower) {
         return "Apple turned this sign-in away, and not because of the password.\n\nApple periodically stops accepting the identity that sideloading tools present, and when it does every one of them breaks at the same moment. Other apps that install without the App Store will be failing right now too.\n\nThis usually clears within a day. If somebody has published a fix, the details go in the two boxes under \"Sign-in helper\" on the sign-in screen, and no new version of Cloak is needed.\n\nDo not keep retrying: Apple locks an account out for two hours after repeated attempts.".to_string();
     }
-    if lower.contains("-20101") || lower.contains("incorrect") {
-        "That Apple ID and password did not match. Note that an app-specific password will not work here — use the real one.".into()
+    if lower.contains("incorrect") {
+        "That Apple ID and password did not match. Note that an app-specific password will not work here, use the real one.".into()
     } else if lower.contains("locked") {
         "Apple has locked this account for security. Sign in at appleid.apple.com first, then come back.".into()
     } else if looks_transient(&lower) {
