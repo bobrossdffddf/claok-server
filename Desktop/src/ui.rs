@@ -919,26 +919,10 @@ impl Installer {
                 if !params.sms {
                     ui.add_space(10.0);
                     ui.label(
-                        RichText::new("Nothing arrived? Make one on the iPhone instead. It does not need Apple to send anything.")
+                        RichText::new("Nothing arrived? Apple will not always send one to a device. Use \u{201c}Text it to me\u{201d} below to have it sent to the phone number on the account instead.")
                             .size(13.0)
                             .color(skin::SECOND),
                     );
-                    ui.add_space(6.0);
-                    for (index, step) in [
-                        "Open Settings and tap your name at the top",
-                        "Tap Sign-In & Security",
-                        "Tap Two-Factor Authentication",
-                        "Tap Get Verification Code",
-                    ]
-                    .iter()
-                    .enumerate()
-                    {
-                        ui.label(
-                            RichText::new(format!("{}. {step}", index + 1))
-                                .size(13.0)
-                                .color(skin::SECOND),
-                        );
-                    }
                 }
                 if let Some(last) = &params.last_error {
                     ui.add_space(8.0);
@@ -971,8 +955,12 @@ impl Installer {
                     if secondary(ui, "Send it again").clicked() {
                         self.send(Command::TwoFactor(TwoFactorCallbackResponse::ResendCode));
                     }
-                    if !params.numbers.is_empty() && secondary(ui, "Text it to me").clicked() {
-                        let id = params.numbers[0].id;
+                    // Offered even when the list of numbers came back empty.
+                    // Apple refuses to hand that list over on plenty of
+                    // accounts, but sending to the first number on the account
+                    // does not need the list, only the number's position.
+                    if secondary(ui, "Text it to me").clicked() {
+                        let id = params.numbers.first().map(|n| n.id).unwrap_or(1);
                         self.send(Command::TwoFactor(TwoFactorCallbackResponse::SendSms(id)));
                     }
                 });

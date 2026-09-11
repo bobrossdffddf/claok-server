@@ -283,8 +283,17 @@ impl AppleAccount {
                     }
                 }
                 LoginState::NeedsSMS2FA(id) => {
+                    // Same as the device path: the list is for showing people
+                    // which number it is going to, and sending to the first
+                    // number on the account needs only its position.
                     if self.trusted_phone_numbers.is_none() {
-                        self.trusted_phone_numbers = Some(self.get_trusted_numbers().await?);
+                        match self.get_trusted_numbers().await {
+                            Ok(numbers) => self.trusted_phone_numbers = Some(numbers),
+                            Err(error) => {
+                                warn!("Apple would not list the numbers: {error}");
+                                self.trusted_phone_numbers = Some(Vec::new());
+                            }
+                        }
                     }
                     info!("SMS 2FA required");
                     self.login_state = self
