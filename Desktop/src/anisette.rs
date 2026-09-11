@@ -205,7 +205,11 @@ pub fn helper_broke(text: &str, url: &str) -> bool {
         return true;
     }
     let lower = text.to_lowercase();
-    lower.contains("/v3/get_headers") || lower.contains("/v3/client_info")
+    lower.contains("/v3/get_headers")
+        || lower.contains("/v3/client_info")
+        || lower.contains("provisioning timed out")
+        || lower.contains("timed out")
+        || lower.contains("timeout")
 }
 
 /// Whether Apple is throttling the identity rather than judging the account.
@@ -305,6 +309,14 @@ pub async fn pick(config: &Config) -> Result<String, Vec<String>> {
 /// different server.
 pub fn helper_was_rejected(text: &str) -> bool {
     let lower = text.to_lowercase();
+
+    // A timeout is the helper giving up on us, not Apple judging anything, and
+    // calling it a refusal both blames the wrong party and burns one of the
+    // attempts that are supposed to be reserved for answers from Apple.
+    if lower.contains("timed out") || lower.contains("timeout") {
+        return false;
+    }
+
     let provisioning_refused = lower.contains("-45003")
         || lower.contains("invalid trust key")
         || lower.contains("provisioning failed")

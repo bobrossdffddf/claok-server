@@ -25,35 +25,49 @@ pub struct GrandSlam {
 }
 
 
-/// Apple refuses a second request that follows too closely.
+/// Apple refuses requests that arrive too fast, but only once it has said so.
 ///
-/// Signing in is several requests in a row: provisioning, the challenge, then
-/// the password proof. Fired back to back they arrive within a second or two of
-/// each other and Apple's edge answers 429 to the later ones, before anything
-/// has looked at the account or the password. It is not a lockout, there is no
-/// Retry-After, and waiting hours does not help because the limit is about the
-/// spacing of requests rather than their number.
+/// Apple's edge answers 429 to bursts from one internet connection. There is no
+/// Retry-After and no account involvement, and it clears after a short quiet
+/// period, which is why waiting hours achieves nothing while attempts keep
+/// arriving.
 ///
-/// So every request through here waits its turn. One at a time, never closer
-/// together than the gap below, and a 429 backs off and tries again rather than
-/// failing a sign-in that is already half finished.
-const MINIMUM_GAP: std::time::Duration = std::time::Duration::from_secs(6);
+/// The obvious response, spacing every request out, is wrong. Provisioning runs
+/// over a websocket where the helper is waiting on us to relay Apple's answers,
+/// and it gives up if we dawdle, so a fixed delay in front of every request
+/// turns a working provision into a timeout.
+///
+/// So nothing is slowed down until Apple actually objects. A 429 sets a cooling
+/// off period that later requests wait out, and the first success clears it.
 const BACKOFF: std::time::Duration = std::time::Duration::from_secs(12);
 const MAX_ATTEMPTS: u32 = 4;
 
-static LAST_REQUEST: std::sync::OnceLock<tokio::sync::Mutex<Option<std::time::Instant>>> =
+static COOLING_OFF: std::sync::OnceLock<tokio::sync::Mutex<Option<std::time::Instant>>> =
     std::sync::OnceLock::new();
 
+fn cooling_off() -> &'static tokio::sync::Mutex<Option<std::time::Instant>> {
+    COOLING_OFF.get_or_init(|| tokio::sync::Mutex::new(None))
+}
+
 async fn pace() {
-    let gate = LAST_REQUEST.get_or_init(|| tokio::sync::Mutex::new(None));
-    let mut last = gate.lock().await;
-    if let Some(previous) = *last {
-        let elapsed = previous.elapsed();
-        if elapsed < MINIMUM_GAP {
-            tokio::time::sleep(MINIMUM_GAP - elapsed).await;
+    let gate = cooling_off();
+    let until = { *gate.lock().await };
+    if let Some(until) = until {
+        let now = std::time::Instant::now();
+        if until > now {
+            let wait = until - now;
+            debug!("waiting {}s for Apple to cool off", wait.as_secs());
+            tokio::time::sleep(wait).await;
         }
     }
-    *last = Some(std::time::Instant::now());
+}
+
+async fn start_cooling_off(pause: std::time::Duration) {
+    *cooling_off().lock().await = Some(std::time::Instant::now() + pause);
+}
+
+async fn stop_cooling_off() {
+    *cooling_off().lock().await = None;
 }
 
 impl GrandSlam {
@@ -188,14 +202,19 @@ impl GrandSlam {
                 .await
                 .context("Failed to send grandslam request")?;
 
-            if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt < MAX_ATTEMPTS {
+            if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
                 let pause = BACKOFF * attempt;
-                warn!(
-                    "Apple asked for a slower pace, waiting {}s before retrying",
-                    pause.as_secs()
-                );
-                tokio::time::sleep(pause).await;
-                continue;
+                start_cooling_off(pause).await;
+                if attempt < MAX_ATTEMPTS {
+                    warn!(
+                        "Apple asked for a slower pace, waiting {}s before retrying",
+                        pause.as_secs()
+                    );
+                    tokio::time::sleep(pause).await;
+                    continue;
+                }
+            } else if resp.status().is_success() {
+                stop_cooling_off().await;
             }
 
             break resp;
