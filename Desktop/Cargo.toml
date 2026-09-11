@@ -47,3 +47,6 @@ opt-level = 2
 lto = "thin"
 strip = true
 
+
+[patch.crates-io]
+isideload = { path = "vendor/isideload" }
