@@ -290,7 +290,7 @@ async fn install(
     // was never going to work reads as though the password was wrong.
     if let Err(detail) = apple_reachable().await {
         tracing::warn!("cannot reach Apple: {detail}");
-        return Err(unreachable_message());
+        return Err(unreachable_message_for(&detail));
     }
 
     step(0.06, "Finding a working sign-in helper");
@@ -822,15 +822,131 @@ async fn apple_reachable() -> Result<(), String> {
         .await
         {
             Ok(Ok(_)) => {}
-            Ok(Err(error)) => return Err(format!("{host}: {error}")),
+            Ok(Err(error)) => {
+                let failure = format!("{host}: {error}");
+                if name_lookup_failed(&failure) && apple_answers_by_address().await {
+                    return Err(BROKEN_RESOLVER.to_string());
+                }
+                return Err(failure);
+            }
             Err(_) => return Err(format!("{host}: timed out")),
         }
     }
     Ok(())
 }
 
+/// Marker for the one network fault that is this computer rather than the line.
+const BROKEN_RESOLVER: &str = "broken-name-lookup";
+
+fn name_lookup_failed(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("failed to lookup address")
+        || lower.contains("nodename nor servname")
+        || lower.contains("name or service not known")
+        || lower.contains("dns")
+}
+
+/// Whether Apple answers when the name lookup is skipped entirely.
+///
+/// If a fixed Apple address answers on 443 while the name will not resolve,
+/// then the connection is fine and the name lookup on this computer is broken.
+/// That happens after VPN software is removed untidily, and it is invisible
+/// from the browser's point of view because it fails identically to being
+/// offline, so it is worth saying out loud rather than blaming the network.
+async fn apple_answers_by_address() -> bool {
+    // Apple's own range. Any of these answering is enough to prove the point.
+    for address in ["17.32.194.34:443", "17.253.144.10:443"] {
+        let reached = tokio::time::timeout(
+            std::time::Duration::from_secs(6),
+            tokio::net::TcpStream::connect(address),
+        )
+        .await;
+        if matches!(reached, Ok(Ok(_))) {
+            return true;
+        }
+    }
+    false
+}
+
+fn unreachable_message_for(failure: &str) -> String {
+    if failure == BROKEN_RESOLVER {
+        return "This computer cannot look up web addresses, so nothing can reach Apple.\n\nThe connection itself is fine. Cloak reached Apple by numeric address a moment ago. What is broken is the part of macOS that turns a name like apple.com into an address, and while it is broken every app on this Mac is affected, not just Cloak.\n\nRestart the Mac. That fixes it. It is usually left behind by VPN software that was removed or quit untidily.".to_string();
+    }
+    unreachable_message()
+}
+
 fn unreachable_message() -> String {
-    "Cloak cannot reach Apple from this network.\n\nSigning in has to talk to apple.com, and something between this computer and Apple is blocking or dropping it. Work, school and guest networks very often do.\n\nTry again on a home network, or share your phone's internet connection and use that.".to_string()
+    let mut message = String::from(
+        "Cloak cannot reach Apple from this network.\n\nSigning in has to talk to apple.com, and something between this computer and Apple is blocking or dropping it. Work, school and guest networks very often do.",
+    );
+    if let Some(name) = tunnel_in_the_way() {
+        message.push_str(&format!(
+            "\n\nEverything on this computer is currently going through {name}, so that is the most likely cause. Turn it off and try again.",
+        ));
+    } else {
+        message.push_str(
+            "\n\nTry again on a home network, or share your phone's internet connection and use that.",
+        );
+    }
+    message
+}
+
+/// The name of the VPN carrying this computer's traffic, if one is.
+///
+/// Apple limits sign-ins hard by internet address, and a VPN puts thousands of
+/// strangers behind one. A shared address is normally already over the limit,
+/// so Apple refuses the sign-in before it looks at anything, and waiting never
+/// helps because the address never goes quiet. It is indistinguishable from a
+/// lockout from the inside and it is the single most common reason this fails.
+#[cfg(target_os = "macos")]
+fn tunnel_in_the_way() -> Option<String> {
+    let route = std::process::Command::new("route")
+        .args(["-n", "get", "default"])
+        .output()
+        .ok()?;
+    let route = String::from_utf8_lossy(&route.stdout);
+    let interface = route
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("interface:"))?
+        .trim();
+
+    let tunnelled = interface.starts_with("utun")
+        || interface.starts_with("ppp")
+        || interface.starts_with("ipsec")
+        || interface.starts_with("tun");
+    if !tunnelled {
+        return None;
+    }
+
+    // The interface says a tunnel, not which one. scutil names the connected
+    // services, and a name is far more use to somebody than "utun26".
+    let listed = std::process::Command::new("scutil")
+        .args(["--nc", "list"])
+        .output()
+        .ok();
+    if let Some(listed) = listed {
+        let text = String::from_utf8_lossy(&listed.stdout);
+        for line in text.lines() {
+            if !line.contains("(Connected)") {
+                continue;
+            }
+            if let Some(start) = line.find('"') {
+                if let Some(end) = line[start + 1..].find('"') {
+                    let name = &line[start + 1..start + 1 + end];
+                    if !name.is_empty() && !name.eq_ignore_ascii_case("Tailscale") {
+                        return Some(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    Some("a VPN".to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn tunnel_in_the_way() -> Option<String> {
+    None
 }
 
 /// Whether Apple rejected the request because the sign-in helper gave it
@@ -899,7 +1015,12 @@ fn friendly_login_error(raw: &str) -> String {
         return "Apple says that password is not right for this Apple ID.\n\nEverything else worked: Apple accepted the computer, accepted the Apple ID, and checked the password, so this is the password itself and nothing else.\n\nTwo things catch people out. An app-specific password will not work here, it has to be the real one. And if two-factor is on, the password still goes in this box and the six digit code is asked for separately afterwards.\n\nIf it is definitely right, sign in at appleid.apple.com once in a browser and then try here again.".to_string();
     }
     if looks_rate_limited(&lower) {
-        return "Apple has temporarily stopped accepting sign-ins from this computer.\n\nIt does this after repeated attempts, and it lasts about two hours. Nothing is wrong with the account and nothing needs changing. Leave it alone and try again later: signing in again now only restarts the clock.".to_string();
+        if let Some(name) = tunnel_in_the_way() {
+            return format!(
+                "Apple is refusing sign-ins from this computer's internet address, and {name} is why.\n\nEverything on this computer is going through it right now, which means Apple sees the same address as everybody else using it. Apple limits sign-ins per address, that shared one is already over the limit, and it never goes quiet enough to recover. Waiting will not fix this.\n\nTurn {name} off and sign in again. It can go back on afterwards."
+            );
+        }
+        return "Apple has temporarily stopped accepting sign-ins from this computer.\n\nIt limits how quickly sign-ins can arrive from one internet connection, and every further attempt keeps it refusing.\n\nLeave it completely alone for ten minutes, then try once. If that does not work, share your phone's internet connection and try once from there.".to_string();
     }
     if looks_like_bad_helper(&lower) {
         return "Apple turned this sign-in away, and not because of the password.\n\nApple periodically stops accepting the identity that sideloading tools present, and when it does every one of them breaks at the same moment. Other apps that install without the App Store will be failing right now too.\n\nThis usually clears within a day. If somebody has published a fix, the details go in the two boxes under \"Sign-in helper\" on the sign-in screen, and no new version of Cloak is needed.\n\nDo not keep retrying: Apple locks an account out for two hours after repeated attempts.".to_string();
