@@ -199,8 +199,19 @@ impl AppleAccount {
                     return Ok(());
                 }
                 LoginState::NeedsDevice2FA => {
+                    // The list of phone numbers exists so "send it by text
+                    // instead" can be offered. The code itself goes to the
+                    // trusted devices and does not need it, so Apple refusing
+                    // the list, which it does with a bare 403 on plenty of
+                    // accounts, must not take the whole sign-in down with it.
                     if self.trusted_phone_numbers.is_none() {
-                        self.trusted_phone_numbers = Some(self.get_trusted_numbers().await?);
+                        match self.get_trusted_numbers().await {
+                            Ok(numbers) => self.trusted_phone_numbers = Some(numbers),
+                            Err(error) => {
+                                warn!("No text message option this time: {error}");
+                                self.trusted_phone_numbers = Some(Vec::new());
+                            }
+                        }
                     }
                     self.send_trusted_device_2fa()
                         .await
