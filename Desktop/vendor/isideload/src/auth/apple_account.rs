@@ -85,6 +85,41 @@ pub struct SMSTwoFactorError {
     pub message: String,
 }
 
+
+/// The ways of naming the asking app, tried in order.
+///
+/// Apple has started refusing requests that identify themselves as Xcode. It is
+/// provable on the sign-in endpoint, where the same request with the Xcode
+/// clause present is refused and without it is answered, and the two factor
+/// endpoints refuse with a bare 403 and no explanation at all, which is
+/// consistent with the same thing.
+///
+/// Rather than picking one and hoping, the request is made as Xcode first, so
+/// that accounts where that still works are unaffected, and then as plainer
+/// clients. Each is a different description of the same computer asking the
+/// same question, not a retry of a rejected answer, and none of them involves
+/// the password.
+const ASKING_AS: &[(Option<&str>, bool)] = &[
+    (Some("com.apple.gs.xcode.auth"), true),
+    (Some("com.apple.gs.idms.auth"), false),
+    (Some("com.apple.gs.appleid.auth"), false),
+    (None, false),
+];
+
+fn described_as(headers: &HeaderMap, app_info: Option<&str>, xcode: bool) -> HeaderMap {
+    let mut headers = headers.clone();
+    headers.remove("X-Apple-App-Info");
+    if let Some(app_info) = app_info {
+        if let Ok(value) = HeaderValue::from_str(app_info) {
+            headers.insert("X-Apple-App-Info", value);
+        }
+    }
+    if !xcode {
+        headers.remove("X-Xcode-Version");
+    }
+    headers
+}
+
 impl AppleAccount {
     /// Create a new AppleAccountBuilder with the given email
     ///
@@ -374,14 +409,31 @@ impl AppleAccount {
             .grandslam_client
             .get_url("trustedDeviceSecondaryAuth")?;
 
-        let response = self
-            .grandslam_client
-            .get(&request_code_url)?
-            .headers(self.build_2fa_headers(&anisette_data).await?)
-            .send()
-            .await
-            .context("Failed to request trusted device 2fa")?;
+        let base = self.build_2fa_headers(&anisette_data).await?;
 
+        let mut response = None;
+        for (app_info, xcode) in ASKING_AS {
+            let attempt = self
+                .grandslam_client
+                .get(&request_code_url)?
+                .headers(described_as(&base, *app_info, *xcode))
+                .send()
+                .await
+                .context("Failed to request trusted device 2fa")?;
+
+            let refused = attempt.status() == reqwest::StatusCode::FORBIDDEN;
+            let described = app_info.unwrap_or("nothing in particular");
+            if refused {
+                debug!("Apple refused a code request made as {described}");
+                response = Some(attempt);
+                continue;
+            }
+            info!("Apple accepted a code request made as {described}");
+            response = Some(attempt);
+            break;
+        }
+
+        let response = response.ok_or_else(|| report!("No code request was made"))?;
         let status = response.status();
         if !status.is_success() {
             // Worth keeping rather than discarding: this endpoint answers 403
@@ -642,13 +694,24 @@ impl AppleAccount {
             .await
             .context("Failed to get anisette data for 2FA")?;
 
-        let res = self
-            .grandslam_client
-            .get_sms("https://gsa.apple.com/auth")?
-            .headers(self.build_2fa_headers(&anisette_data).await?)
-            .send()
-            .await?;
+        let base = self.build_2fa_headers(&anisette_data).await?;
 
+        let mut res = None;
+        for (app_info, xcode) in ASKING_AS {
+            let attempt = self
+                .grandslam_client
+                .get_sms("https://gsa.apple.com/auth")?
+                .headers(described_as(&base, *app_info, *xcode))
+                .send()
+                .await?;
+            let refused = attempt.status() == reqwest::StatusCode::FORBIDDEN;
+            res = Some(attempt);
+            if !refused {
+                break;
+            }
+        }
+
+        let res = res.ok_or_else(|| report!("No request for the numbers was made"))?;
         let status = res.status().as_u16();
         let text = res
             .text()

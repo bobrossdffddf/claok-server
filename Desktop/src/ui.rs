@@ -887,7 +887,7 @@ impl Installer {
         let params = self.two_factor.clone().unwrap();
         let mut open = true;
 
-        egui::Window::new("Apple sent you a code")
+        egui::Window::new("Apple needs a code")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
@@ -916,6 +916,30 @@ impl Installer {
                     .size(13.5)
                     .color(skin::SECOND),
                 );
+                if !params.sms {
+                    ui.add_space(10.0);
+                    ui.label(
+                        RichText::new("Nothing arrived? Make one on the iPhone instead. It does not need Apple to send anything.")
+                            .size(13.0)
+                            .color(skin::SECOND),
+                    );
+                    ui.add_space(6.0);
+                    for (index, step) in [
+                        "Open Settings and tap your name at the top",
+                        "Tap Sign-In & Security",
+                        "Tap Two-Factor Authentication",
+                        "Tap Get Verification Code",
+                    ]
+                    .iter()
+                    .enumerate()
+                    {
+                        ui.label(
+                            RichText::new(format!("{}. {step}", index + 1))
+                                .size(13.0)
+                                .color(skin::SECOND),
+                        );
+                    }
+                }
                 if let Some(last) = &params.last_error {
                     ui.add_space(8.0);
                     ui.label(RichText::new(last).size(13.0).color(skin::RED));
