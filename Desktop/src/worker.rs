@@ -28,6 +28,8 @@ pub enum Command {
     EnableDeveloperMode { udid: String },
     Install { udid: String, apple_id: String, password: String, remember: bool },
     TwoFactor(TwoFactorCallbackResponse),
+    /// The six digit code the phone shows during remote pairing.
+    PairingPin(String),
     OpenLocalDevVPN,
 }
 
@@ -41,6 +43,8 @@ pub enum Event {
     Status(String),
     Progress(f32),
     NeedTwoFactor(Box<TwoFactorCallbackParams>),
+    /// The phone has a pairing code on its screen; the window must ask for it.
+    NeedPairingPin,
     DeveloperModeRevealed,
     /// iOS will not do it for us on this phone, so the person has to flip the
     /// switch themselves. Not a failure: the manual route works fine.
@@ -78,11 +82,17 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: Events, ipa: Path
     // has gone to sleep waiting for it, so it needs a channel of its own.
     let (code_tx, code_rx) = tokio::sync::mpsc::unbounded_channel::<TwoFactorCallbackResponse>();
     let code_rx = Arc::new(Mutex::new(code_rx));
+    let (pin_tx, pin_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let pin_rx = Arc::new(Mutex::new(pin_rx));
 
     while let Some(command) = commands.recv().await {
         match command {
             Command::TwoFactor(response) => {
                 let _ = code_tx.send(response);
+            }
+
+            Command::PairingPin(pin) => {
+                let _ = pin_tx.send(pin);
             }
 
             Command::Scan => {
@@ -135,9 +145,10 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: Events, ipa: Path
                 let events = events.clone();
                 let ipa = ipa.clone();
                 let code_rx = code_rx.clone();
+                let pin_rx = pin_rx.clone();
                 tokio::spawn(async move {
                     let outcome = install(
-                        &udid, &apple_id, &password, remember, &ipa, &events, code_rx,
+                        &udid, &apple_id, &password, remember, &ipa, &events, code_rx, pin_rx,
                     ).await;
                     match outcome {
                         Ok(()) => { let _ = events.send(Event::Installed); }
@@ -266,6 +277,7 @@ async fn install(
     ipa: &PathBuf,
     events: &Events,
     code_rx: Arc<Mutex<UnboundedReceiver<TwoFactorCallbackResponse>>>,
+    pin_rx: Arc<Mutex<UnboundedReceiver<String>>>,
 ) -> Result<(), String> {
     if !ipa.exists() {
         return Err(format!(
@@ -465,12 +477,65 @@ async fn install(
     // own developer services. Pushing it across afterwards over AFC is what
     // used to happen, and iOS refused it every single time with a permission
     // error, which left every install below iOS 27 quietly broken.
+    // The remote pairing record, the one that survives iOS 26.4 and later.
+    // The phone shows a code, the person types it in the window, and the
+    // record travels inside the app next to the lockdown one. iOS 27 refuses
+    // this direction of pairing, so it is skipped there and the app pairs
+    // outward on its own.
+    let remote_record: Option<String> = {
+        let major = device::ios_major(&provider).await.unwrap_or(0);
+        let name = device::device_name(&provider).await.unwrap_or_else(|| "iPhone".to_string());
+        if major >= 27 {
+            None
+        } else {
+            step(0.20, "Pairing the new way (a code will appear on the phone)");
+            match remote_pair(&name, events, pin_rx.clone()).await {
+                Ok(record) => {
+                    tracing::info!("remote pairing record obtained");
+                    let _ = events.send(Event::Status("Paired the new way. Continuing.".into()));
+                    Some(record)
+                }
+                Err(reason) => {
+                    tracing::warn!("remote pairing skipped: {reason}");
+                    let _ = events.send(Event::Status(format!("Could not pair the new way ({reason}). Continuing with the classic record.")));
+                    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+                    None
+                }
+            }
+        }
+    };
+
+    // The signing identity travels too, so a refresh done on the phone uses
+    // this computer's certificate under this computer's machine name instead
+    // of asking Apple for a second one. A free account only gets one, and a
+    // second request revokes the first, which is how "it worked yesterday"
+    // turns into an app that will not open.
+    let signing_identity: Option<String> = {
+        let storage = crate::state::FileStorage::new();
+        match isideload::sideload::cert_identity::CertificateIdentity::ensure_private_key(apple_id, &storage).await {
+            Ok((key_name, der)) => {
+                use base64::Engine;
+                Some(serde_json::json!({
+                    "key": key_name,
+                    "der": base64::engine::general_purpose::STANDARD.encode(der),
+                    "machine": machine_name(),
+                }).to_string())
+            }
+            Err(error) => {
+                tracing::warn!("signing identity not bundled: {error}");
+                None
+            }
+        }
+    };
+
+    let mut record_bundled = false;
     let ipa = match handoff::pairing_record(&provider).await {
         Ok(record) => {
             let bundled = std::env::temp_dir().join("Cloak-paired.ipa");
-            match handoff::bundle_pairing_record(ipa, &record, &bundled) {
+            match handoff::bundle_pairing_record(ipa, &record, remote_record.as_deref(), signing_identity.as_deref(), &bundled) {
                 Ok(()) => {
                     tracing::info!("pairing record bundled into the app");
+                    record_bundled = true;
                     bundled
                 }
                 Err(reason) => {
@@ -483,7 +548,15 @@ async fn install(
         }
         Err(reason) => {
             tracing::warn!("no pairing record to hand over: {reason}");
-            ipa.clone()
+            if remote_record.is_some() || signing_identity.is_some() {
+                let bundled = std::env::temp_dir().join("Cloak-paired.ipa");
+                match handoff::bundle_pairing_record(ipa, &[], remote_record.as_deref(), signing_identity.as_deref(), &bundled) {
+                    Ok(()) => { record_bundled = true; bundled }
+                    Err(reason) => { tracing::warn!("could not bundle the remote pairing: {reason}"); ipa.clone() }
+                }
+            } else {
+                ipa.clone()
+            }
         }
     };
     let ipa = &ipa;
@@ -601,21 +674,38 @@ async fn install(
         .await
         .map_err(|e| friendly_install_error(&e.to_string()))?;
 
-    // Read this before the signed copy is thrown away.
+    // Read these before the signed copy is thrown away.
     let profile_uuid = crate::handoff::profile_uuid(&signed);
+    let profile_bytes = std::fs::read(signed.join("embedded.mobileprovision")).ok();
     let _ = std::fs::remove_dir_all(&signed);
 
     step(0.92, "Telling iOS to trust it");
 
     // Without this the first launch is met with "Untrusted Developer" and a
     // hunt through Settings. iOS lets a connected computer answer that for
-    // you, so it does. Older iOS does not offer the action, and then the app
-    // has to say so rather than leaving the user stuck.
+    // you, so it does.
+    //
+    // Two things learned on iOS 27. The install returns before the phone has
+    // registered the app's provisioning profile (it was doing that lazily on
+    // first launch), and asking it to trust a profile it has not registered
+    // is answered with a bare {success: false}. So the profile is registered
+    // through misagent first, the way AltStore does, and the trust request is
+    // retried for a few seconds while the install settles.
+    if let Some(bytes) = profile_bytes {
+        match crate::handoff::register_profile(&provider, bytes).await {
+            Ok(()) => tracing::info!("provisioning profile registered with the phone"),
+            Err(message) => tracing::warn!("could not register the profile: {message}"),
+        }
+    }
     let mut trusted = false;
     if let Some(uuid) = &profile_uuid {
-        match crate::handoff::trust_signer(&provider, uuid).await {
-            Ok(value) => trusted = value,
-            Err(message) => tracing::warn!("could not trust the signer: {message}"),
+        for attempt in 1..=5u32 {
+            match crate::handoff::trust_signer(&provider, uuid).await {
+                Ok(true) => { trusted = true; break; }
+                Ok(false) => tracing::warn!("trust attempt {attempt}: the phone said no"),
+                Err(message) => tracing::warn!("trust attempt {attempt}: {message}"),
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
     }
     let _ = events.send(Event::Trusted(trusted));
@@ -624,12 +714,19 @@ async fn install(
 
     let bundle_id = format!("app.cloak.ios.{}", team.team_id);
 
-    // Give the freshly installed app a moment to exist as far as the phone is
-    // concerned, then hand it the pairing record so it needs no setup of its
-    // own. Failing here is survivable: Cloak can still pair with itself.
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    if let Err(message) = crate::handoff::send_pairing_record(&provider, &bundle_id).await {
-        tracing::warn!("pairing handoff skipped: {message}");
+    // The record travelled inside the app, so there is nothing left to hand
+    // over. The AFC push only runs when bundling failed; iOS refuses it on
+    // most versions, but it is the only remaining route in that case.
+    if !record_bundled {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        if let Err(message) = crate::handoff::send_pairing_record(&provider, &bundle_id).await {
+            tracing::warn!("pairing handoff skipped: {message}");
+        }
+    }
+
+    step(0.98, "Leaving a copy for on-phone refresh");
+    if let Err(message) = crate::handoff::send_app_copy(&provider, &bundle_id, ipa).await {
+        tracing::warn!("could not leave an app copy for on-phone refresh: {message}");
     }
 
     step(1.0, "Done");
@@ -1077,10 +1174,57 @@ pub async fn refresh_now(ipa: PathBuf, force: bool) -> Result<(), String> {
     let (_code_tx, code_rx) = tokio::sync::mpsc::unbounded_channel();
     let code_rx = Arc::new(Mutex::new(code_rx));
 
-    install(&udid, &apple_id, &password, false, &ipa, &tx, code_rx).await
+    // Headless: nobody can type a pairing code, so the remote pairing step
+    // gets a channel that answers empty at once and is skipped.
+    let (_pin_tx, pin_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    drop(_pin_tx);
+    let pin_rx = Arc::new(Mutex::new(pin_rx));
+    install(&udid, &apple_id, &password, false, &ipa, &tx, code_rx, pin_rx).await
 }
 
 /// Whether this phone still needs anything done to it.
 pub fn developer_mode_ok(phone: &Phone) -> bool {
     matches!(phone.developer_mode, DeveloperMode::On | DeveloperMode::NotApplicable)
+}
+
+
+/// Runs remote pairing against the phone from this computer, asking the
+/// window for the code the phone shows.
+async fn remote_pair(
+    device_name: &str,
+    events: &Events,
+    pin_rx: Arc<Mutex<UnboundedReceiver<String>>>,
+) -> Result<String, String> {
+    let name = device_name.to_string();
+    let found = tokio::task::spawn_blocking(move || crate::rppair::browse(std::time::Duration::from_secs(12)))
+        .await
+        .map_err(|e| format!("browse task: {e}"))??;
+    if found.is_empty() {
+        return Err("no phone is advertising remote pairing on this computer's networks (is the phone on the same Wi-Fi as this computer?)".to_string());
+    }
+
+    let events = events.clone();
+    let ask = || {
+        let events = events.clone();
+        let pin_rx = pin_rx.clone();
+        async move {
+            let _ = events.send(Event::NeedPairingPin);
+            // Drain anything stale, then wait for the fresh one.
+            let mut guard = pin_rx.lock().await;
+            while let Ok(_) = guard.try_recv() {}
+            guard.recv().await.unwrap_or_default()
+        }
+    };
+
+    let mut last = String::new();
+    for target in crate::rppair::ordered(&found, &name) {
+        let _ = events.send(Event::Status(format!("Pairing with {}", target.name.trim_end_matches(&format!(".{}", "_remotepairing._tcp.local.")))));
+        match tokio::time::timeout(std::time::Duration::from_secs(180), crate::rppair::pair(target, &ask)).await {
+            Ok(Ok(record)) => return Ok(record),
+            Ok(Err(reason)) => last = format!("{}: {reason}", target.name),
+            Err(_) => last = format!("{}: pairing timed out", target.name),
+        }
+        tracing::warn!("remote pairing with {} failed: {last}", target.name);
+    }
+    Err(last)
 }

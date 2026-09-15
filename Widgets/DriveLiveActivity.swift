@@ -9,6 +9,10 @@ private enum Live {
     static let warn = Color(red: 0.961, green: 0.647, blue: 0.141)
     static let danger = Color(red: 1.0, green: 0.353, blue: 0.373)
 
+    static func metres(_ value: Double) -> String {
+        Units.distance(value)
+    }
+
     static func tint(_ state: DriveActivityAttributes.ContentState) -> Color {
         if state.isPaused { return warn }
         if state.isOverLimit { return danger }
@@ -148,10 +152,20 @@ private struct LockScreenView: View {
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
 
-                    Text(state.coordinateText)
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.5))
-                        .lineLimit(1)
+                    if let real = state.realSpeedMph, let back = state.holdingBackMetres {
+                        // SHIELD: the truth next to what is being reported.
+                        Text(back > 20
+                             ? String(format: "Really %.0f mph, holding back %@", real, Live.metres(back))
+                             : String(format: "Really %.0f mph, caught up", real))
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.6))
+                            .lineLimit(1)
+                    } else {
+                        Text(state.coordinateText)
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.5))
+                            .lineLimit(1)
+                    }
                 }
 
                 Spacer(minLength: 6)

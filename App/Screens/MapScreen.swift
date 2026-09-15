@@ -16,11 +16,17 @@ struct MapScreen: View {
     /// this, because there does not need to be one.
     @State private var followsSimulation = true
 
+    /// The route as MapKit wants it, built once per route rather than from
+    /// every point on every redraw. The screen redraws each second while a
+    /// drive runs, and converting a few thousand points each time was a
+    /// visible stutter on the map.
+    @State private var routeOverlay: [CLLocationCoordinate2D]?
+
     var body: some View {
         MapReader { proxy in
             Map(position: $camera) {
-                if let plan = model.activePlan {
-                    MapPolyline(coordinates: plan.polyline.points.map(\.clCoordinate))
+                if let route = routeOverlay {
+                    MapPolyline(coordinates: route)
                         .stroke(Palette.accent.opacity(0.85), style: StrokeStyle(lineWidth: 6, lineCap: .round, lineJoin: .round))
                 }
 
@@ -48,10 +54,27 @@ struct MapScreen: View {
                     }
                 }
 
+                // Your real location, always. While a simulation runs iOS hands
+                // this app the fake fix too, so the blue dot is the fake one;
+                // this marker is the last real position Cloak read before it
+                // started, kept on the map so you never lose where you are.
+                if model.snapshot.isRunning, let real = model.realPosition {
+                    Annotation("You (real)", coordinate: real.clCoordinate) {
+                        RealYouMarker()
+                    }
+                }
+
                 UserAnnotation()
             }
-            .mapStyle(.standard(elevation: .realistic, pointsOfInterest: .including([.cafe, .restaurant, .gasStation])))
-            .mapControls { MapCompass() }
+            // Flat, not realistic 3D terrain: the realistic mode is the most
+            // expensive thing MapKit can draw, and this screen redraws once a
+            // second for the whole of a drive. Flat is what Apple Maps shows in
+            // its default view too.
+            .mapStyle(.standard(elevation: .flat, pointsOfInterest: .including([.cafe, .restaurant, .gasStation])))
+            .mapControls {
+                MapCompass()
+                MapUserLocationButton()
+            }
             .onMapCameraChange(frequency: .onEnd) { context in
                 // Any deliberate move of the map hands control back to the
                 // person until something new starts.
@@ -97,6 +120,9 @@ struct MapScreen: View {
                 .presentationCornerRadius(26)
                 .interactiveDismissDisabled()
         }
+        .onChange(of: model.activePlan.map { "\($0.polyline.points.count)-\($0.polyline.length)-\($0.polyline.points.first?.latitude ?? 0)" }, initial: true) { _, _ in
+            routeOverlay = model.activePlan?.polyline.points.map(\.clCoordinate)
+        }
         .onChange(of: model.snapshot.isRunning) { _, running in
             if running { followsSimulation = true }
         }
@@ -138,7 +164,7 @@ struct MapScreen: View {
         }
         .animation(.snappy, value: model.snapshot.isRunning)
         .padding(.trailing, Metrics.snug)
-        .padding(.top, Metrics.tight)
+        .padding(.top, 54)
         .sheet(isPresented: $showsDiagnostics) { DiagnosticsView() }
         .sheet(isPresented: $showsSettings) { SettingsView() }
     }
@@ -187,7 +213,7 @@ struct StatusPill: View {
                 Spacer(minLength: 8)
 
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(.caption2, weight: .semibold))
                     .foregroundStyle(Palette.dim)
             }
             .glassCard(padding: 10, radius: 16)
@@ -231,7 +257,7 @@ struct SimulatedMarker: View {
                 .shadow(color: Palette.accent.opacity(0.6), radius: 8)
             if moving, course >= 0 {
                 Image(systemName: "location.north.fill")
-                    .font(.system(size: 9, weight: .black))
+                    .font(.system(.caption2, weight: .black))
                     .foregroundStyle(Palette.ground)
                     .rotationEffect(.degrees(course))
             }
@@ -242,10 +268,27 @@ struct SimulatedMarker: View {
     }
 }
 
+struct RealYouMarker: View {
+    var body: some View {
+        VStack(spacing: 2) {
+            ZStack {
+                Circle().fill(Color.blue.opacity(0.25)).frame(width: 26, height: 26)
+                Circle().fill(Color.blue).frame(width: 12, height: 12)
+                    .overlay(Circle().stroke(.white, lineWidth: 2))
+            }
+            Text("You")
+                .font(.readout(9, weight: .bold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 5).padding(.vertical, 1)
+                .background(Color.blue, in: Capsule())
+        }
+    }
+}
+
 struct DroppedPin: View {
     var body: some View {
         Image(systemName: "mappin.circle.fill")
-            .font(.system(size: 26))
+            .font(.system(.title))
             .foregroundStyle(Palette.warn, Palette.ground)
             .shadow(radius: 4)
     }
@@ -263,3 +306,4 @@ struct WaypointPin: View {
             .overlay(Circle().stroke(Palette.ground, lineWidth: 2))
     }
 }
+

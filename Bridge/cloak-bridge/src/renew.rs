@@ -143,7 +143,7 @@ struct Job {
     password: String,
     ipa: PathBuf,
     state_dir: String,
-    pairing: PairingFile,
+    pairing: Option<PairingFile>,
     address: std::net::IpAddr,
     device_name: String,
     device_udid: String,
@@ -162,7 +162,7 @@ async fn run(session: Arc<RenewSession>, job: Job) {
 
 async fn renew(session: &Arc<RenewSession>, job: &Job) -> Result<(), String> {
     if !job.ipa.exists() {
-        return Err("The copy of Cloak to re-sign is not on this phone.".to_string());
+        return Err("The working copy of Cloak to re-sign is missing.".to_string());
     }
 
     working(session, "Reaching Apple", 0.04);
@@ -274,14 +274,27 @@ async fn renew(session: &Arc<RenewSession>, job: &Job) -> Result<(), String> {
 
     working(session, "Installing", 0.74);
 
-    // The phone cannot open a connection to its own lockdown service, which is
-    // where AFC and the installation proxy live. The loopback reflector is what
-    // makes that connection arrive looking like it came from somewhere else, so
-    // it has to be running before this point.
+    // iOS 27 refuses the phone's own lockdown port even through the reflector,
+    // but it will install over the tunnel the phone opened to itself when it
+    // paired without a computer. That tunnel is preferred when it is up; the
+    // lockdown route below is what earlier versions use.
+    match crate::rp::install_over_tunnel(signed.clone()).await {
+        Ok(()) => return Ok(()),
+        Err(error) => {
+            if job.pairing.is_none() {
+                return Err(friendly(&error));
+            }
+            working(session, "Trying the pairing record route", 0.75);
+        }
+    }
+
+    let Some(pairing) = job.pairing.clone() else {
+        return Err("No pairing available to install with.".to_string());
+    };
     let provider = idevice::provider::TcpProvider {
         addr: job.address,
         scope_id: None,
-        pairing_file: job.pairing.clone(),
+        pairing_file: pairing,
         label: "Cloak".to_string(),
     };
 
@@ -368,12 +381,14 @@ pub extern "C" fn cloak_renew_start(
         return RENEW_ERR;
     };
 
-    if pairing.is_null() || pairing_len == 0 {
-        return RENEW_ERR;
-    }
-    let raw = unsafe { std::slice::from_raw_parts(pairing, pairing_len) };
-    let Ok(pairing_file) = PairingFile::from_bytes(raw) else {
-        return RENEW_ERR;
+    let pairing_file = if pairing.is_null() || pairing_len == 0 {
+        None
+    } else {
+        let raw = unsafe { std::slice::from_raw_parts(pairing, pairing_len) };
+        match PairingFile::from_bytes(raw) {
+            Ok(file) => Some(file),
+            Err(_) => return RENEW_ERR,
+        }
     };
 
     let Ok(addr) = address.trim().parse::<std::net::IpAddr>() else {

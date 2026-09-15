@@ -30,6 +30,10 @@ public struct DriveActivityAttributes: ActivityAttributes {
         public var startedAt: Date
         /// Zero means the run has no end time of its own.
         public var endsAt: Date?
+        /// SHIELD only: what the car is really doing and how far behind the
+        /// reported position sits.
+        public var realSpeedMph: Double?
+        public var holdingBackMetres: Double?
 
         public init(
             label: String,
@@ -43,7 +47,9 @@ public struct DriveActivityAttributes: ActivityAttributes {
             distanceRemaining: Double? = nil,
             isPaused: Bool,
             startedAt: Date,
-            endsAt: Date? = nil
+            endsAt: Date? = nil,
+            realSpeedMph: Double? = nil,
+            holdingBackMetres: Double? = nil
         ) {
             self.label = label
             self.activity = activity
@@ -57,6 +63,8 @@ public struct DriveActivityAttributes: ActivityAttributes {
             self.isPaused = isPaused
             self.startedAt = startedAt
             self.endsAt = endsAt
+            self.realSpeedMph = realSpeedMph
+            self.holdingBackMetres = holdingBackMetres
         }
 
         public var coordinateText: String {
@@ -75,8 +83,7 @@ public struct DriveActivityAttributes: ActivityAttributes {
 
         public var distanceText: String? {
             guard let meters = distanceRemaining, meters > 0 else { return nil }
-            if meters < 950 { return "\(Int(meters.rounded())) m left" }
-            return String(format: "%.1f km left", meters / 1000)
+            return Units.distance(meters) + " left"
         }
 
         public var isOverLimit: Bool {
@@ -101,6 +108,7 @@ public extension SimulationMode {
         case .route(_, let travel): travel.displayName
         case .replay: "Replaying"
         case .joystick: "Manual"
+        case .shield: "SHIELD"
         }
     }
 
@@ -112,6 +120,7 @@ public extension SimulationMode {
         case .route(let name, _): name
         case .replay(let name): name
         case .joystick: "Wherever you steer"
+        case .shield(let mode): "Your drive, \(mode.detail.lowercased())"
         }
     }
 
@@ -122,6 +131,7 @@ public extension SimulationMode {
         case .route(_, let travel): travel == .drive ? "car.fill" : "figure.walk"
         case .replay: "arrow.clockwise.circle.fill"
         case .joystick: "gamecontroller.fill"
+        case .shield: "shield.checkered"
         }
     }
 }

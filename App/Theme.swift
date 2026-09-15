@@ -11,15 +11,47 @@ enum Palette {
     static let danger = Color(red: 1.0, green: 0.353, blue: 0.373)
     static let ok = Color(red: 0.231, green: 0.878, blue: 0.541)
     static let dim = Color.white.opacity(0.55)
+
+    /// A soft vertical wash for the app background, a touch of depth instead of
+    /// one flat colour.
+    static var backdrop: LinearGradient {
+        LinearGradient(
+            colors: [Color(red: 0.055, green: 0.075, blue: 0.098), ground],
+            startPoint: .top, endPoint: .bottom)
+    }
+
+    /// The accent as a gradient, for primary buttons and the ring.
+    static var accentFill: LinearGradient {
+        LinearGradient(colors: [accent, accentDeep], startPoint: .topLeading, endPoint: .bottomTrailing)
+    }
 }
 
 extension Font {
+    /// The text style whose default size is nearest the size a screen asked
+    /// for. Every font in the app used to be a fixed point size, which means
+    /// the Larger Text setting did nothing anywhere. Anchoring each size to a
+    /// text style keeps the design at the default setting and lets it scale.
+    private static func style(for size: CGFloat) -> Font.TextStyle {
+        switch size {
+        case ..<11.5: .caption2
+        case ..<12.5: .caption
+        case ..<14.5: .footnote
+        case ..<15.5: .subheadline
+        case ..<16.5: .callout
+        case ..<19: .body
+        case ..<21: .title3
+        case ..<25: .title2
+        case ..<31: .title
+        default: .largeTitle
+        }
+    }
+
     static func readout(_ size: CGFloat, weight: Font.Weight = .semibold) -> Font {
-        .system(size: size, weight: weight, design: .rounded).monospacedDigit()
+        .system(style(for: size), design: .rounded, weight: weight).monospacedDigit()
     }
 
     static func label(_ size: CGFloat, weight: Font.Weight = .medium) -> Font {
-        .system(size: size, weight: weight, design: .rounded)
+        .system(style(for: size), design: .rounded, weight: weight)
     }
 }
 
@@ -30,11 +62,15 @@ struct GlassCard: ViewModifier {
     func body(content: Content) -> some View {
         content
             .padding(padding)
-            .background(.ultraThinMaterial, in: .rect(cornerRadius: radius, style: .continuous))
+            .background(Palette.surface.opacity(0.92), in: .rect(cornerRadius: radius, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.09), lineWidth: 1)
+                    .strokeBorder(
+                        LinearGradient(colors: [Color.white.opacity(0.14), Color.white.opacity(0.03)],
+                                       startPoint: .top, endPoint: .bottom),
+                        lineWidth: 1)
             )
+            .shadow(color: .black.opacity(0.28), radius: 14, x: 0, y: 8)
     }
 }
 
@@ -49,7 +85,7 @@ struct Eyebrow: View {
 
     var body: some View {
         Text(text.uppercased())
-            .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+            .font(.system(.caption2, design: .rounded, weight: .semibold))
             .tracking(1.3)
             .foregroundStyle(Palette.dim)
     }
@@ -86,9 +122,16 @@ struct PrimaryButtonStyle: ButtonStyle {
             .font(.label(16, weight: .semibold))
             .foregroundStyle(Palette.ground)
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 14)
-            .background(tint.opacity(configuration.isPressed ? 0.75 : 1), in: .rect(cornerRadius: 14, style: .continuous))
-            .scaleEffect(configuration.isPressed ? 0.98 : 1)
+            .padding(.vertical, 15)
+            .background {
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .fill(tint == Palette.accent
+                          ? AnyShapeStyle(Palette.accentFill)
+                          : AnyShapeStyle(tint))
+                    .opacity(configuration.isPressed ? 0.8 : 1)
+            }
+            .shadow(color: tint.opacity(configuration.isPressed ? 0.1 : 0.35), radius: 10, x: 0, y: 4)
+            .scaleEffect(configuration.isPressed ? 0.985 : 1)
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
@@ -115,7 +158,7 @@ struct CircleControl: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: 16, weight: .semibold))
+                .font(.system(.callout, weight: .semibold))
                 .foregroundStyle(active ? Palette.ground : tint)
                 .frame(width: 44, height: 44)
                 .background {
@@ -196,7 +239,7 @@ struct Row<Trailing: View>: View {
                         .fill(tint.opacity(0.16))
                         .frame(width: 30, height: 30)
                     Image(systemName: symbol)
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.system(.footnote, weight: .semibold))
                         .foregroundStyle(tint)
                 }
 
@@ -250,7 +293,7 @@ struct ActionRow: View {
         Button(action: action) {
             Row(symbol: symbol, title: title, subtitle: subtitle, tint: tint, showsDivider: showsDivider) {
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(.caption, weight: .semibold))
                     .foregroundStyle(Palette.dim)
             }
         }
@@ -275,8 +318,9 @@ struct StatusDot: View {
         ZStack {
             Circle().fill((ok ? okTint : Palette.dim).opacity(0.18)).frame(width: 22, height: 22)
             Image(systemName: ok ? "checkmark" : "exclamationmark")
-                .font(.system(size: 10, weight: .black))
+                .font(.system(.caption2, weight: .black))
                 .foregroundStyle(ok ? okTint : Palette.dim)
         }
     }
 }
+

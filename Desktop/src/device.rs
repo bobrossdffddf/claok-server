@@ -282,3 +282,24 @@ pub async fn wait_for_return(udid: &str, seconds: u64) -> bool {
     }
     false
 }
+
+/// One lockdown value as a string, over a fresh session.
+async fn lockdown_string(provider: &dyn IdeviceProvider, key: &str) -> Option<String> {
+    let mut lockdown = LockdownClient::connect(provider).await.ok()?;
+    let pairing = provider.get_pairing_file().await.ok()?;
+    lockdown.start_session(&pairing).await.ok()?;
+    lockdown
+        .get_value(Some(key), None)
+        .await
+        .ok()
+        .and_then(|v| v.as_string().map(str::to_owned))
+}
+
+pub async fn device_name(provider: &dyn IdeviceProvider) -> Option<String> {
+    lockdown_string(provider, "DeviceName").await
+}
+
+pub async fn ios_major(provider: &dyn IdeviceProvider) -> Option<u32> {
+    let version = lockdown_string(provider, "ProductVersion").await?;
+    version.split('.').next()?.parse().ok()
+}

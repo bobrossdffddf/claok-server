@@ -27,7 +27,10 @@ final class RunScheduler {
     func attach(container: ModelContainer, model: AppModel) {
         self.container = container
         self.model = model
-        Task { await requestNotificationPermission() }
+        // Not here. Asking for notifications the moment the app opens, before
+        // anyone has scheduled anything, is the permission prompt Apple's
+        // guidelines say not to show. It is asked the first time a run is
+        // actually scheduled, which is when a notification would mean something.
         rebuildNotifications()
         start()
     }
@@ -167,6 +170,9 @@ final class RunScheduler {
         guard let container else { return }
         let context = ModelContext(container)
         let runs = (try? context.fetch(FetchDescriptor<ScheduledRun>())) ?? []
+        if runs.contains(where: { $0.isEnabled }) {
+            Task { await requestNotificationPermission() }
+        }
 
         let center = UNUserNotificationCenter.current()
         center.removeAllPendingNotificationRequests()

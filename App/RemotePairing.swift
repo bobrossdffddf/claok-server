@@ -1,5 +1,6 @@
 import Foundation
 import UIKit
+import os
 import Observation
 import CloakKit
 
@@ -33,14 +34,21 @@ final class RemotePairing {
         case failed(String)
     }
 
-    var phase: Phase = .idle
+    private static let log = Logger(subsystem: "app.cloak.ios", category: "remote-pairing")
+
+    var phase: Phase = .idle {
+        didSet { Self.log.notice("phase \(String(describing: self.phase), privacy: .public)") }
+    }
     var pin = ""
     var detail: String?
-    var note: String?
+    var note: String? {
+        didSet { if let note { Self.log.error("note: \(note, privacy: .public)") } }
+    }
     var services: [String] = []
     /// Which way this attempt is going about it, so the screen can describe
     /// the right thing rather than the thing that used to happen.
     var route: Route = .lockdown
+    private var triedOutward = false
     /// Set when the failure was Local Network permission, so the screen can
     /// offer the one switch that fixes it rather than describing it.
     var needsLocalNetwork = false
@@ -48,6 +56,11 @@ final class RemotePairing {
     /// both were tried and what each of them said.
     var lockdownFailure: String?
     var hostName = UIDevice.current.name.isEmpty ? "Cloak" : "Cloak on \(UIDevice.current.name)"
+
+    /// The same name, for screens that have no pairing object yet.
+    static var hostNameForDisplay: String {
+        UIDevice.current.name.isEmpty ? "Cloak" : "Cloak on \(UIDevice.current.name)"
+    }
 
     enum Route: Equatable {
         /// Straight to this phone's own lockdown service on its fixed port.
@@ -125,17 +138,34 @@ final class RemotePairing {
         // this, a failure here is invisible: the fallback runs, fails for its
         // own unrelated reason, and reports that instead, which reads as
         // though nothing was ever fixed.
-        let lockdownReason = note ?? "no reason given"
-        lockdownFailure = lockdownReason
+        if planned.contains(.lockdown) {
+            lockdownFailure = note ?? "no reason given"
+        }
 
-        // Only if that could not happen at all. These both need iOS to be
-        // advertising something, which is exactly the part that fails.
-        if planned.contains(.pairableHost) {
-            route = .pairableHost
-            startHost()
-        } else {
-            route = .discovered
-            await connectTunnel()
+        // Only if that could not happen at all. The order below is the
+        // version's plan: on 27 outward pairing is the only one that works, on
+        // 26 the inbound remote pairing goes first and outward is the last
+        // resort, and each falls through to the next on failure.
+        let remaining = planned.filter { $0 == .pairableHost || $0 == .discovery }
+        for (position, next) in remaining.enumerated() {
+            let last = position == remaining.count - 1
+            switch next {
+            case .pairableHost:
+                triedOutward = true
+                route = .pairableHost
+                startHost()
+                return
+            case .discovery:
+                route = .discovered
+                await connectTunnel()
+                if case .failed(let reason) = phase, !last {
+                    note = "Inbound pairing did not work (\(reason)). Trying outward pairing instead."
+                    continue
+                }
+                return
+            default:
+                continue
+            }
         }
     }
 
@@ -191,7 +221,11 @@ final class RemotePairing {
         stop()
         reset()
         RemotePairingBackend.forgetRecord()
-        if Self.usesPairableHost {
+        // Repair goes straight to the route that survives a refused lockdown
+        // port: outward pairing wherever this iOS can do it (26 and up), the
+        // old discovery route only below that.
+        if Self.plannedRoutes.contains(.pairableHost) {
+            route = .pairableHost
             startHost()
         } else {
             await connectTunnel()
@@ -214,6 +248,7 @@ final class RemotePairing {
 
     private func reset() {
         triedMount = false
+        triedOutward = false
         startedTunnel = false
         ignoreTunnel = false
         needsLocalNetwork = false
@@ -293,12 +328,13 @@ final class RemotePairing {
             note = Reflector.missingAdvice
         }
 
-        guard let endpoint = await RemotePairingDiscovery.find() else {
+        guard var endpoint = await RemotePairingDiscovery.find() else {
             // One message for three quite different problems was useless. The
             // browser's own state says which one it is.
             let direct = lockdownFailure.map {
                 "\n\nPairing directly with this phone was tried first and did not work: \($0)"
             } ?? ""
+            let scan = RemotePairingDiscovery.lastScanReport.map { "\n\nPort scan: \($0)" } ?? ""
 
             switch RemotePairingDiscovery.lastObstacle {
             case .localNetworkDenied:
@@ -307,21 +343,30 @@ final class RemotePairing {
                     Cloak is not allowed to see this phone's own network, and iOS will not tell it where the pairing service is without that.
 
                     Open Settings, tap Cloak, and turn on Local Network. Then come back and start pairing again.
-                    """ + direct)
+                    """ + direct + scan)
             case .noNetwork:
                 phase = .failed("""
                     This phone has no Wi-Fi address, and iOS only offers its pairing service on a real network interface.
 
                     Join a Wi-Fi network, or turn on Personal Hotspot, then try again. It can be a network with no internet at all.
-                    """ + direct)
+                    """ + direct + scan)
             default:
                 phase = .failed("""
                     iOS is not advertising its pairing service right now.
 
                     Make sure Wi-Fi is on and that Cloak has Local Network permission in Settings, then try again. Locking and unlocking the phone often brings it back.
-                    """ + direct)
+                    """ + direct + scan + "\n\nInterfaces: " + RemotePairingDiscovery.interfaceReport())
             }
             return
+        }
+
+        // The remoted port, for the route iOS 26.4+ still opens.
+        if let remoted = await RemotePairingDiscovery.findRemotedPort() {
+            detail = "remoted on port \(remoted)"
+            RemotePairingBackend.setRemotedPort(remoted)
+            for extra in RemotePairingDiscovery.remotedCandidates(port: remoted) where !endpoint.hosts.contains(extra) {
+                endpoint.hosts.append(extra)
+            }
         }
 
         let hosts = reflectorReady
@@ -342,11 +387,29 @@ final class RemotePairing {
     // MARK: - Polling
 
     private func startPolling() {
+        let advertisingSince = ContinuousClock.now
         poller = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
                 await self.apply(RemotePairingBackend.status())
                 if case .failed = self.phase { return }
+                // Below iOS 27 the outward route is a fallback, and a phone
+                // that does not browse for pairable hosts never connects. Give
+                // it a fair window, then move on to the discovery route rather
+                // than sit here advertising to nobody.
+                if case .advertising = self.phase,
+                   !Self.usesPairableHost,
+                   Self.plannedRoutes.firstIndex(of: .discovery).map({ $0 > (Self.plannedRoutes.firstIndex(of: .pairableHost) ?? -1) }) == true,
+                   ContinuousClock.now - advertisingSince > .seconds(45) {
+                    self.note = "This phone did not come looking for Cloak, trying the pairing service it advertises instead."
+                    self.advertiser.stop()
+                    self.published = false
+                    self.endAssertion()
+                    self.route = .discovered
+                    self.poller = nil
+                    await self.connectTunnel()
+                    return
+                }
                 try? await Task.sleep(for: .milliseconds(400))
             }
         }
@@ -421,6 +484,18 @@ final class RemotePairing {
             // actually carrying traffic.
             let reason = (status.reason ?? "unknown")
                 + "\n\nInterfaces: " + RemotePairingDiscovery.interfaceReport()
+            // On iOS 26 the inbound route may be refused the way 27 refuses it;
+            // the outward route is the planned last resort, tried once.
+            if route == .discovered, !triedOutward, storedRecord == nil,
+               Self.plannedRoutes.last == .pairableHost {
+                triedOutward = true
+                note = "Inbound pairing was refused (\(status.reason ?? "unknown")). Trying outward pairing instead."
+                poller?.cancel()
+                poller = nil
+                route = .pairableHost
+                startHost()
+                return
+            }
             phase = .failed(reason)
             return
 

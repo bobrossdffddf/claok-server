@@ -149,6 +149,22 @@ impl CertificateIdentity {
         })
     }
 
+    /// The storage key the private key lives under for this Apple ID, and
+    /// the PKCS#8 DER of that key, creating it if this is the first time.
+    /// Lets another copy of the signer (Cloak on the phone) share the same
+    /// identity instead of asking Apple for a second certificate, which on a
+    /// free account means revoking the first.
+    pub async fn ensure_private_key(
+        apple_email: &str,
+        storage: &dyn SideloadingStorage,
+    ) -> Result<(String, Vec<u8>), Report> {
+        let key = Self::retrieve_private_key(apple_email, storage).await?;
+        let mut hasher = Sha256::new();
+        hasher.update(apple_email.as_bytes());
+        let email_hash = hex::encode(hasher.finalize());
+        Ok((format!("{}/key", email_hash), key.to_pkcs8_der()?.as_bytes().to_vec()))
+    }
+
     async fn retrieve_private_key(
         apple_email: &str,
         storage: &dyn SideloadingStorage,

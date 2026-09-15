@@ -109,6 +109,6 @@ public struct TripVariation: Sendable {
         guard departureSlack > 0 || paceSlack > 0 || lateralDrift > 0 else {
             return "Replayed exactly as recorded."
         }
-        return "Departure shifts up to \(Int(departureSlack)) min, pace up to \(Int(paceSlack * 100))%, path wanders up to \(Int(lateralDrift)) m."
+        return "Departure shifts up to \(Int(departureSlack)) min, pace up to \(Int(paceSlack * 100))%, path wanders up to \(Units.feet(lateralDrift))."
     }
 }

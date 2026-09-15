@@ -45,8 +45,12 @@ public enum PairingPlan {
     /// model in the app rather than a setting.
     public static let minimumSupportedMajor = 17
 
-    /// Where the pairable-host flow appears.
+    /// Where the pairable-host flow is the first and only sensible route.
     public static let pairableHostMajor = 27
+
+    /// From here the lockdown record is refused over the network (26.4 on),
+    /// so a remote pairing record is preferred when one exists.
+    public static let outwardPairingMajor = 26
 
     /// Everything worth trying, in order, on this version of iOS.
     ///
@@ -58,12 +62,26 @@ public enum PairingPlan {
             return [.stored]
         }
 
-        var routes: [PairingRoute] = [.lockdown]
+        // On iOS 27 the phone answers a connection to its own lockdown port
+        // with a plain refusal even through the reflector (measured on a real
+        // device: 10.7.0.1:62078 -> ECONNREFUSED on every handshake variant), so
+        // asking it first only costs time and a confusing first error. The
+        // outward pairing route is the one that works there.
         if iOSMajor >= pairableHostMajor {
-            routes.append(.pairableHost)
+            return [.pairableHost, .discovery]
         }
-        routes.append(.discovery)
-        return routes
+        // iOS 26 is split: early builds answer lockdown, later ones (26.4 on,
+        // and measured on a friend's phone: "tls handshake eof" then
+        // "connection reset" on 10.7.0.1) refuse it the way 27 does. So
+        // lockdown is still tried first, and the outward pairing route comes
+        // next instead of the old discovery route, which needs the very
+        // thing that is refusing.
+        // Below 27 the outward route cannot complete: the "Devices" list in
+        // Developer Mode that the phone would pair from does not exist
+        // (confirmed on 26.6.2, the screen is just the switch). SideStore's
+        // fix for 26.4+ is inbound remote pairing, which is the discovery
+        // route here, so that is what 26 gets after lockdown.
+        return [.lockdown, .discovery]
     }
 
     /// Whether Cloak can run at all on this version.

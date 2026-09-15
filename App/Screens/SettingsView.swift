@@ -8,6 +8,7 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var showsDiagnostics = false
+    @State private var showsSigning = false
     @State private var showsPairing = false
     @State private var confirmsReset = false
 
@@ -43,6 +44,7 @@ struct SettingsView: View {
         }
         .preferredColorScheme(.dark)
         .sheet(isPresented: $showsDiagnostics) { DiagnosticsView() }
+        .sheet(isPresented: $showsSigning) { SigningView() }
         .sheet(isPresented: $showsPairing, onDismiss: { model.refreshPairingState() }) {
             PairWithoutComputerView()
         }
@@ -223,7 +225,7 @@ struct SettingsView: View {
                                     HStack(alignment: .top, spacing: 10) {
                                         Image(systemName: model.speedHelp.profile == profile
                                               ? "largecircle.fill.circle" : "circle")
-                                            .font(.system(size: 16))
+                                            .font(.system(.callout))
                                             .foregroundStyle(model.speedHelp.profile == profile
                                                              ? Palette.accent : Palette.dim)
                                         VStack(alignment: .leading, spacing: 2) {
@@ -307,6 +309,14 @@ struct SettingsView: View {
             }
 
             ActionRow(
+                symbol: "signature",
+                title: "Signing",
+                subtitle: signingSubtitle
+            ) {
+                showsSigning = true
+            }
+
+            ActionRow(
                 symbol: "iphone.radiowaves.left.and.right",
                 title: "Pairing",
                 subtitle: model.hasAnyPairing ? "Paired with this phone" : "Not paired yet"
@@ -347,6 +357,12 @@ struct SettingsView: View {
                 }
             }
         }
+    }
+
+    private var signingSubtitle: String {
+        guard let info = SignatureInfo.fromBundle() else { return "Keep Cloak signed" }
+        if info.hasExpired { return "Expired, refresh now" }
+        return "\(info.daysLeft) \(info.daysLeft == 1 ? "day" : "days") until it needs a refresh"
     }
 
     private var licenseDetail: String {

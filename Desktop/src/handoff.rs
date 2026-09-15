@@ -61,6 +61,49 @@ pub async fn send_pairing_record(
     Ok(())
 }
 
+/// Leaves a copy of the Cloak app inside its own folder on the phone.
+///
+/// On-device renewal needs an app file to re-sign, and the phone has no other
+/// way to get one. This drops the same ipa the installer shipped into Cloak's
+/// Documents as Cloak.ipa, so a later refresh on the phone has something to
+/// work from with no computer involved.
+pub async fn send_app_copy(
+    provider: &dyn IdeviceProvider,
+    bundle_id: &str,
+    ipa_path: &std::path::Path,
+) -> Result<(), String> {
+    let bytes = std::fs::read(ipa_path)
+        .map_err(|e| format!("Could not read the Cloak app file: {e}"))?;
+
+    let house_arrest = HouseArrestClient::connect(provider)
+        .await
+        .map_err(|e| format!("Could not open Cloak's folder on the iPhone: {e}"))?;
+
+    let (mut afc, path): (AfcClient, String) = match house_arrest.vend_documents(bundle_id).await {
+        Ok(afc) => (afc, "/Cloak.ipa".to_string()),
+        Err(first) => {
+            let house_arrest = HouseArrestClient::connect(provider)
+                .await
+                .map_err(|e| format!("Could not open Cloak's folder on the iPhone: {e}"))?;
+            let afc = house_arrest.vend_container(bundle_id).await.map_err(|e| {
+                format!("The iPhone would not open Cloak's folder: {first}, then {e}")
+            })?;
+            (afc, "/Documents/Cloak.ipa".to_string())
+        }
+    };
+
+    let mut file = afc
+        .open(path, AfcFopenMode::WrOnly)
+        .await
+        .map_err(|e| format!("Could not create the app copy: {e}"))?;
+
+    file.write_entire(&bytes)
+        .await
+        .map_err(|e| format!("Could not write the app copy: {e}"))?;
+
+    Ok(())
+}
+
 /// Reads the UUID out of the provisioning profile inside a signed app.
 ///
 /// The profile is a CMS envelope with a plain XML plist inside it, so the
@@ -76,6 +119,26 @@ pub fn profile_uuid(signed_app: &std::path::Path) -> Option<String> {
         .get("UUID")?
         .as_string()
         .map(str::to_owned)
+}
+
+/// Registers the app's provisioning profile with the phone.
+///
+/// The install carries the profile inside the app, but the phone registers it
+/// lazily, on first launch, and the trust request below needs it registered
+/// now. misagent does it immediately and is idempotent.
+pub async fn register_profile(
+    provider: &dyn IdeviceProvider,
+    profile: Vec<u8>,
+) -> Result<(), String> {
+    use idevice::misagent::MisagentClient;
+
+    let mut misagent = MisagentClient::connect(provider)
+        .await
+        .map_err(|e| format!("Could not reach the profile service on the iPhone: {e}"))?;
+    misagent
+        .install(profile)
+        .await
+        .map_err(|e| format!("The iPhone would not take the profile: {e}"))
 }
 
 /// Tells iOS to trust the certificate this app was signed with.
@@ -94,9 +157,50 @@ pub async fn trust_signer(
         .await
         .map_err(|e| format!("Could not reach the security service on the iPhone: {e}"))?;
 
-    amfi.trust_app_signer(profile_uuid)
+    // Done by hand rather than through the library call, because the library
+    // keeps only a success boolean and throws the phone's actual answer away.
+    // On iOS 27 that answer has not been what the library expects, and the
+    // reason is the only thing worth knowing. Same wire format as the library:
+    // a big-endian length, then an XML plist.
+    let mut request = plist::Dictionary::new();
+    request.insert("action".into(), plist::Value::Integer(4.into()));
+    request.insert(
+        "input_profile_uuid".into(),
+        plist::Value::String(profile_uuid.to_string()),
+    );
+    let mut body = Vec::new();
+    plist::to_writer_xml(&mut body, &plist::Value::Dictionary(request))
+        .map_err(|e| format!("Could not build the trust request: {e}"))?;
+    let mut framed = (body.len() as u32).to_be_bytes().to_vec();
+    framed.extend_from_slice(&body);
+    amfi.idevice
+        .send_raw(&framed)
         .await
-        .map_err(|e| format!("The iPhone would not trust the signature: {e}"))
+        .map_err(|e| format!("Could not ask the iPhone to trust the signature: {e}"))?;
+
+    let len = amfi
+        .idevice
+        .read_raw(4)
+        .await
+        .map_err(|e| format!("The iPhone did not answer the trust request: {e}"))?;
+    let len = u32::from_be_bytes([len[0], len[1], len[2], len[3]]) as usize;
+    let raw = amfi
+        .idevice
+        .read_raw(len)
+        .await
+        .map_err(|e| format!("The iPhone did not finish answering the trust request: {e}"))?;
+    let answer: plist::Value = plist::from_bytes(&raw)
+        .map_err(|e| format!("The iPhone's trust answer was not a plist: {e}"))?;
+    tracing::warn!("trust app signer ({profile_uuid}) answered: {answer:?}");
+
+    let dict = answer.as_dictionary().cloned().unwrap_or_default();
+    let success = dict.get("success").and_then(|v| v.as_boolean()).unwrap_or(false);
+    let status = dict.get("status").and_then(|v| v.as_boolean());
+    match (success, status) {
+        (true, Some(b)) => Ok(b),
+        (true, None) => Ok(true),
+        _ => Err(format!("The iPhone would not trust the signature: {answer:?}")),
+    }
 }
 
 /// Puts the pairing record inside the app itself, before it is signed.
@@ -110,9 +214,13 @@ pub async fn trust_signer(
 /// A file placed in the bundle before signing has none of those problems. It is
 /// covered by the signature like everything else, it arrives with the app, and
 /// there is no version of iOS where it fails to be there.
+pub const SIGNING_FILE: &str = "cloak-signing.json";
+
 pub fn bundle_pairing_record(
     ipa: &std::path::Path,
     record: &[u8],
+    remote_record: Option<&str>,
+    signing: Option<&str>,
     destination: &std::path::Path,
 ) -> Result<(), String> {
     use std::io::Write;
@@ -141,6 +249,34 @@ pub fn bundle_pairing_record(
         writer
             .raw_copy_file(entry)
             .map_err(|e| format!("Could not rebuild the app: {e}"))?;
+    }
+
+    if let Some(remote) = remote_record {
+        writer
+            .start_file(
+                format!("{app_dir}{}", crate::rppair::RP_FILE),
+                zip::write::SimpleFileOptions::default(),
+            )
+            .map_err(|e| format!("Could not add the remote pairing record: {e}"))?;
+        writer
+            .write_all(remote.as_bytes())
+            .map_err(|e| format!("Could not write the remote pairing record: {e}"))?;
+    }
+
+    if let Some(signing) = signing {
+        writer
+            .start_file(
+                format!("{app_dir}{SIGNING_FILE}"),
+                zip::write::SimpleFileOptions::default(),
+            )
+            .map_err(|e| format!("Could not add the signing identity: {e}"))?;
+        writer
+            .write_all(signing.as_bytes())
+            .map_err(|e| format!("Could not write the signing identity: {e}"))?;
+    }
+
+    if record.is_empty() {
+        return writer.finish().map(|_| ()).map_err(|e| format!("Could not finish the app: {e}"));
     }
 
     writer

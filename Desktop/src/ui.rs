@@ -86,6 +86,8 @@ pub struct Installer {
     progress: f32,
     failure: Option<String>,
     two_factor: Option<TwoFactorCallbackParams>,
+    needs_pairing_pin: bool,
+    pin: String,
     code: String,
     config: Config,
     /// An Apple sign-in helper set by hand. Empty means let Cloak choose.
@@ -119,6 +121,8 @@ impl Installer {
             progress: 0.0,
             failure: None,
             two_factor: None,
+            needs_pairing_pin: false,
+            pin: String::new(),
             code: String::new(),
             anisette_url: config.anisette_url.clone().unwrap_or_default(),
             client_info: config.client_info.clone().unwrap_or_default(),
@@ -167,6 +171,10 @@ impl Installer {
                     self.two_factor = Some(*params);
                     self.code.clear();
                 }
+                Event::NeedPairingPin => {
+                    self.needs_pairing_pin = true;
+                    self.pin.clear();
+                }
                 Event::DeveloperModeRevealed => self.revealed = true,
                 Event::DeveloperModeManual => {
                     self.failure = None;
@@ -179,6 +187,16 @@ impl Installer {
                 Event::Installed => {
                     self.password.clear();
                     self.config = Config::load();
+                    // Renewal on by default. The signature lasts seven days
+                    // and nobody remembers to come back and press a button in
+                    // a week; the password is already in the keychain when
+                    // "remember" was ticked, which is the default. The Done
+                    // screen still offers to turn it off.
+                    if self.remember && agent::status() != Schedule::Installed {
+                        if let Err(message) = agent::install() {
+                            tracing::warn!("could not schedule renewal: {message}");
+                        }
+                    }
                     // iOS answered the trust prompt itself on anything recent
                     // enough. When it did not, that is a real step the user
                     // has to do and it gets a screen of its own.
@@ -269,6 +287,57 @@ impl eframe::App for Installer {
 
         if self.two_factor.is_some() {
             self.two_factor_window(ctx);
+        }
+        if self.needs_pairing_pin {
+            self.pairing_pin_window(ctx);
+        }
+    }
+}
+
+impl Installer {
+    fn pairing_pin_window(&mut self, ctx: &egui::Context) {
+        let mut open = true;
+        egui::Window::new("Your iPhone is showing a code")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .open(&mut open)
+            .frame(
+                egui::Frame::new()
+                    .fill(skin::PANEL)
+                    .corner_radius(CornerRadius::same(12))
+                    .stroke(Stroke::new(1.0, skin::LINE))
+                    .inner_margin(Margin::same(22)),
+            )
+            .show(ctx, |ui| {
+                ui.set_min_width(320.0);
+                ui.label(
+                    RichText::new("Look at the iPhone. It is asking whether to pair with \u{201c}Cloak\u{201d} and showing a six digit code. Type that code here.")
+                        .size(13.5)
+                        .color(skin::SECOND),
+                );
+                ui.add_space(14.0);
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.pin)
+                        .hint_text("000000")
+                        .margin(Margin::symmetric(10, 11))
+                        .horizontal_align(Align::Center)
+                        .font(FontId::new(22.0, FontFamily::Monospace))
+                        .desired_width(f32::INFINITY),
+                );
+                let entered = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                ui.add_space(14.0);
+                let ready = self.pin.trim().len() >= 6;
+                ui.add_enabled_ui(ready, |ui| {
+                    if primary(ui, "Pair").clicked() || (entered && ready) {
+                        self.send(Command::PairingPin(self.pin.trim().to_string()));
+                        self.needs_pairing_pin = false;
+                    }
+                });
+            });
+        if !open {
+            self.send(Command::PairingPin(String::new()));
+            self.needs_pairing_pin = false;
         }
     }
 }

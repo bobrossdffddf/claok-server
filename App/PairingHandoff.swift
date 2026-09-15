@@ -37,6 +37,24 @@ enum PairingHandoff {
         return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 
+    /// The remote pairing record the installer made from the computer, the
+    /// one that works from iOS 26.4 on where the lockdown record does not.
+    /// Taken on once, into the same keychain slot the phone fills when it
+    /// pairs by itself, so everything downstream is identical either way.
+    @discardableResult
+    static func adoptRemoteRecord() -> Bool {
+        guard RemotePairingBackend.storedRecord == nil,
+              let url = Bundle.main.url(forResource: "cloak-rppairing", withExtension: "txt"),
+              let text = try? String(contentsOf: url, encoding: .utf8) else {
+            return false
+        }
+        let record = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !record.isEmpty else { return false }
+        SecureDefaults.set(record, forKey: RemotePairingBackend.recordKey)
+        log.notice("adopted the remote pairing record that came inside the app")
+        return true
+    }
+
     /// Imports the record if one is waiting. Returns true if something new was
     /// taken on.
     @discardableResult

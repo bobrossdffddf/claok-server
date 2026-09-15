@@ -65,7 +65,7 @@ struct RouteTab: View {
             Eyebrow(text: "Add a stop")
             HStack(spacing: 10) {
                 Image(systemName: "magnifyingglass")
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.system(.footnote, weight: .semibold))
                     .foregroundStyle(Palette.dim)
 
                 TextField("Search an address or place", text: $query)
@@ -111,7 +111,7 @@ struct RouteTab: View {
                 } label: {
                     HStack(spacing: 12) {
                         Image(systemName: "mappin.circle.fill")
-                            .font(.system(size: 18))
+                            .font(.system(.body))
                             .foregroundStyle(Palette.accent)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(item.name ?? "Result")
@@ -363,7 +363,7 @@ struct RouteTab: View {
                     } label: {
                         VStack(spacing: 5) {
                             Image(systemName: mode.symbolName)
-                                .font(.system(size: 15, weight: .semibold))
+                                .font(.system(.subheadline, weight: .semibold))
                             Text(mode.displayName).font(.label(11, weight: .semibold))
                         }
                         .frame(maxWidth: .infinity)

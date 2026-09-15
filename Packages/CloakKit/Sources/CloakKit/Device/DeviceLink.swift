@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 public actor DeviceLink {
     public private(set) var state = DeviceLinkState()
@@ -32,9 +33,16 @@ public actor DeviceLink {
         for continuation in continuations.values { continuation.yield(state) }
     }
 
+    private static let log = Logger(subsystem: "app.cloak.ios", category: "device-link")
+
     private func set(_ stage: LinkStage, _ status: StageStatus) {
         state.stages[stage] = status
-        if case .failed(let message) = status { state.lastError = message }
+        if case .failed(let message) = status {
+            state.lastError = message
+            Self.log.error("stage \(String(describing: stage), privacy: .public) failed: \(message, privacy: .public)")
+        } else if case .ready = status {
+            Self.log.notice("stage \(String(describing: stage), privacy: .public) ready")
+        }
         publish()
     }
 

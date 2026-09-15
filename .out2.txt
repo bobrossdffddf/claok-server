@@ -1,0 +1,3 @@
+hdiutil: WARNING: 'hdiutil create -volname -format ...' is deprecated. Please use 'diskutil image create from/blank --volumeName --format ...' instead.
+wrote /Users/wacko/Downloads/Cloak/dist/CloakInstaller-macos.dmg  (version 1.3, build 10300)
+-rw-r--r--@ 1 wacko  staff    19M Sep 11 13:58 /Users/wacko/Downloads/Cloak/dist/CloakInstaller-macos.dmg

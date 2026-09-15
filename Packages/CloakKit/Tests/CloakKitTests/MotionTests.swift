@@ -167,6 +167,23 @@ struct RoadDataTests {
         #expect(RoadClass(osmHighway: "residential").defaultLimit == Speed.mph(25))
     }
 
+    /// A point on a 45 mph road, right at a junction with a 25 mph side
+    /// street, must read 45. The old nearest-vertex lookup read 25 there.
+    @Test func limitsFollowTheRoadBeingDriven() {
+        let start = Coordinate(latitude: 37.0, longitude: -122.0)
+        let main = Polyline(points: [start, start.moved(bearing: 90, distance: 600)]).densified(spacing: 10)
+        let junction = main.coordinate(at: 300)
+        let side = [junction.moved(bearing: 0, distance: 120), junction, junction.moved(bearing: 180, distance: 120)]
+        let metadata = RoadMetadata(segments: [
+            RoadSegment(roadClass: .primary, limit: Speed.mph(45), nodes: [start, start.moved(bearing: 90, distance: 600)]),
+            RoadSegment(roadClass: .residential, limit: Speed.mph(25), nodes: side),
+        ], controls: [])
+        let limits = metadata.limits(along: main)
+        let atJunction = limits[main.points.indices.min(by: { abs(main.cumulative[$0] - 300) < abs(main.cumulative[$1] - 300) })!]
+        #expect(Int(Speed.toMph(atJunction).rounded()) == 45)
+        #expect(limits.allSatisfy { Int(Speed.toMph($0).rounded()) == 45 })
+    }
+
     @Test func controlsSnapToTheLine() {
         let start = Coordinate(latitude: 37.0, longitude: -122.0)
         let line = Polyline(points: [start, start.moved(bearing: 90, distance: 400)]).densified(spacing: 5)
@@ -196,5 +213,45 @@ struct PairingTests {
         let data = try PropertyListSerialization.data(fromPropertyList: dictionary, format: .xml, options: 0)
         let record = try PairingRecord.parse(data)
         #expect(record.udid.hasPrefix("00008110"))
+    }
+}
+
+@Suite("SHIELD")
+struct ShieldTests {
+    /// The car does 50 on a 30 road for a minute. The shadow must never
+    /// report above 30 and must end up behind the car.
+    @Test func neverReportsAboveTheCap() {
+        var shield = ShieldEngine(settings: ShieldSettings(isEnabled: true, mode: .slow), fallbackLimit: Speed.mph(30))
+        let start = Coordinate(latitude: 37.0, longitude: -122.0)
+        var position = start
+        var maxShown = 0.0
+        for second in 0..<60 {
+            position = position.moved(bearing: 90, distance: Speed.mph(50))
+            shield.observe(RealFix(coordinate: position, speed: Speed.mph(50), timestamp: Date(timeIntervalSince1970: Double(second))))
+            if let fix = shield.step(deltaTime: 1, limitAt: { _ in Speed.mph(30) }) {
+                maxShown = max(maxShown, fix.speed)
+            }
+        }
+        #expect(maxShown <= Speed.mph(30) + 0.01)
+        #expect(shield.holdingBack > 400)
+    }
+
+    /// Once the car stops, the shadow catches up at the cap and then stops too.
+    @Test func catchesUpWhenTheCarStops() {
+        var shield = ShieldEngine(settings: ShieldSettings(isEnabled: true, mode: .fast), fallbackLimit: Speed.mph(30))
+        var position = Coordinate(latitude: 37.0, longitude: -122.0)
+        for _ in 0..<30 {
+            position = position.moved(bearing: 0, distance: Speed.mph(60))
+            shield.observe(RealFix(coordinate: position, speed: Speed.mph(60), timestamp: .now))
+            _ = shield.step(deltaTime: 1, limitAt: { _ in Speed.mph(30) })
+        }
+        #expect(shield.holdingBack > 100)
+        var lastSpeed = 0.0
+        for _ in 0..<120 {
+            shield.observe(RealFix(coordinate: position, speed: 0, timestamp: .now))
+            lastSpeed = shield.step(deltaTime: 1, limitAt: { _ in Speed.mph(30) })?.speed ?? 0
+        }
+        #expect(shield.holdingBack < 1)
+        #expect(lastSpeed == 0)
     }
 }

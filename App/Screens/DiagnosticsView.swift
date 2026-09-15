@@ -12,11 +12,70 @@ struct DiagnosticsView: View {
     @State private var survey: String?
     @State private var showsRemotePairing = false
 
+    private func smoothnessDetail(fixes: Int) -> String {
+        let gap = model.snapshot.longestGapLastMinute ?? 0
+        let push = model.snapshot.slowestPushLastMinute ?? 0
+        var text = "\(fixes) fixes in the last minute (60 is perfect), longest gap \(String(format: "%.1f", gap))s"
+        if push > 0.8 { text += ", slowest push \(String(format: "%.1f", push))s (the tunnel is slow)" }
+        if fixes < 50 { text += ". iOS is pausing Cloak: check Location is allowed and Low Power Mode is off" }
+        return text
+    }
+
+    private var backgroundOK: Bool {
+        model.locationAuthorization == .authorizedAlways || model.locationAuthorization == .authorizedWhenInUse
+    }
+
+    private var backgroundDetail: String {
+        switch model.locationAuthorization {
+        case .authorizedAlways: "Location is Always, so a drive keeps moving while you use other apps"
+        case .authorizedWhenInUse: "Location is While Using, which still keeps a running drive alive in the background"
+        case .denied, .restricted: "Location is off for Cloak. Without it iOS suspends Cloak the moment you switch apps and the drive stops. Allow it in Settings"
+        default: "Location has not been allowed yet. Start a drive and allow it when asked"
+        }
+    }
+
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     summaryCard
+
+                    if let seen = model.observedLocation {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Eyebrow(text: "What iOS tells apps right now")
+                            if let derived = seen.derivedSpeed {
+                                Text(String(format: "Movement apps can see: %.0f mph", derived * 2.23694))
+                                    .font(.label(15, weight: .semibold))
+                                    .foregroundStyle(derived * 2.23694 >= 15 ? Palette.ok : Palette.warn)
+                                Text(derived * 2.23694 >= 15
+                                     ? "Above the 15 mph that Life360 uses to decide you are driving. It also wants about half a mile of this in a row, and it needs to be receiving location in the background."
+                                     : "Below the 15 mph Life360 needs before it calls this a drive. Speed limits along the route, or a stop, are holding it here.")
+                                    .font(.label(12))
+                                    .foregroundStyle(Palette.dim)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                if let course = seen.derivedCourse {
+                                    Text(String(format: "Direction of travel: %.0f°", course))
+                                        .font(.label(12))
+                                        .foregroundStyle(Palette.dim)
+                                }
+                            }
+                            Text(seen.speed < 0
+                                 ? "Speed field: -1 (iOS never fills this in for a simulated fix, with any tool; every app works it out from movement, as above)"
+                                 : String(format: "Speed field: %.1f mph", seen.speed * 2.23694))
+                                .font(.label(12))
+                                .foregroundStyle(Palette.dim)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text(seen.course < 0
+                                 ? "Heading field: -1"
+                                 : String(format: "Heading field: %.0f°", seen.course))
+                                .font(.label(12))
+                                .foregroundStyle(Palette.dim)
+                            Text(String(format: "Accuracy: %@, %.0fs ago", Units.feet(seen.horizontalAccuracy), Date.now.timeIntervalSince(seen.timestamp)))
+                                .font(.label(12))
+                                .foregroundStyle(Palette.dim)
+                        }
+                        .glassCard()
+                    }
 
                     VStack(alignment: .leading, spacing: 8) {
                         Eyebrow(text: "The chain")
@@ -24,6 +83,10 @@ struct DiagnosticsView: View {
                         chainRow("Developer image", ok: model.hasDeveloperImage, detail: model.hasDeveloperImage ? "Cached on this device" : "Not transferred yet")
                         chainRow("Tunnel", ok: model.snapshot.linkMessage == nil && model.snapshot.isRunning, detail: tunnelDetail)
                         chainRow("Location service", ok: model.snapshot.isRunning && model.snapshot.linkMessage == nil, detail: model.snapshot.isRunning ? "Pushing fixes" : "Idle")
+                        chainRow("Keeps running in background", ok: backgroundOK, detail: backgroundDetail)
+                        if model.snapshot.isRunning, let fixes = model.snapshot.fixesLastMinute {
+                            chainRow("Smoothness", ok: fixes >= 50 && (model.snapshot.longestGapLastMinute ?? 0) < 2.5, detail: smoothnessDetail(fixes: fixes))
+                        }
                     }
 
                     if !model.hasLocalNetwork {
@@ -91,7 +154,7 @@ struct DiagnosticsView: View {
                         VStack(alignment: .leading, spacing: 8) {
                             Eyebrow(text: "What pairing can see")
                             Text(survey)
-                                .font(.system(size: 11, design: .monospaced))
+                                .font(.system(.caption2, design: .monospaced))
                                 .foregroundStyle(Palette.dim)
                                 .textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -112,7 +175,7 @@ struct DiagnosticsView: View {
                         VStack(alignment: .leading, spacing: 8) {
                             Eyebrow(text: "Tunnel self test")
                             Text(testResult)
-                                .font(.system(size: 12, design: .monospaced))
+                                .font(.system(.caption, design: .monospaced))
                                 .foregroundStyle(testResult.hasPrefix("PASS") ? Palette.ok : Palette.warn)
                                 .textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -159,7 +222,7 @@ struct DiagnosticsView: View {
             ZStack {
                 Circle().fill(overallTint.opacity(0.18)).frame(width: 52, height: 52)
                 Image(systemName: overallSymbol)
-                    .font(.system(size: 22, weight: .semibold))
+                    .font(.system(.title2, weight: .semibold))
                     .foregroundStyle(overallTint)
             }
             VStack(alignment: .leading, spacing: 3) {
@@ -200,7 +263,7 @@ struct DiagnosticsView: View {
     private func chainRow(_ title: String, ok: Bool, detail: String) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: ok ? "checkmark.circle.fill" : "circle.dotted")
-                .font(.system(size: 16))
+                .font(.system(.callout))
                 .foregroundStyle(ok ? Palette.ok : Palette.dim)
                 .padding(.top, 1)
             VStack(alignment: .leading, spacing: 2) {

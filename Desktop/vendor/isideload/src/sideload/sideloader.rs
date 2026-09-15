@@ -98,7 +98,16 @@ impl Sideloader {
 
         let main_bundle_id = app.main_bundle_id()?;
         let main_app_name = app.main_app_name()?;
-        let main_app_id_str = format!("{}.{}", main_bundle_id, team.team_id);
+        // A bundle that has been through this once already carries the team
+        // suffix. Re-signing the installed copy (renewal on the phone) must
+        // keep the identifier it has, or the result installs as a second app
+        // and the extensions end up with the team named twice.
+        let team_suffix = format!(".{}", team.team_id);
+        let main_app_id_str = if main_bundle_id.ends_with(&team_suffix) {
+            main_bundle_id.clone()
+        } else {
+            format!("{}.{}", main_bundle_id, team.team_id)
+        };
         app.update_bundle_id(&main_bundle_id, &main_app_id_str)?;
         let mut app_ids = app
             .register_app_ids(

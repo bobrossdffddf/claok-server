@@ -54,15 +54,20 @@ public struct Polyline: Sendable {
         return Polyline(points: output)
     }
 
+    /// The nearest point on the line, not the nearest vertex. Route lines
+    /// have vertices only where the road bends, so a vertex search was up to
+    /// half a straight away from the true nearest point, which put snapped
+    /// traffic lights in the wrong place and lost the ones between vertices.
     public func nearestDistance(to target: Coordinate) -> (alongTrack: Double, offset: Double) {
         guard !points.isEmpty else { return (0, .greatestFiniteMagnitude) }
+        guard points.count > 1 else { return (0, points[0].distance(to: target)) }
         var bestAlong: Double = 0
         var bestOffset = Double.greatestFiniteMagnitude
-        for index in points.indices {
-            let candidate = points[index].distance(to: target)
-            if candidate < bestOffset {
-                bestOffset = candidate
-                bestAlong = cumulative[index]
+        for index in 0..<(points.count - 1) {
+            let (metres, fraction) = target.distance(toSegmentFrom: points[index], to: points[index + 1])
+            if metres < bestOffset {
+                bestOffset = metres
+                bestAlong = cumulative[index] + fraction * (cumulative[index + 1] - cumulative[index])
             }
         }
         return (bestAlong, bestOffset)

@@ -258,7 +258,7 @@ impl GrandSlam {
         Ok(response_plist)
     }
 
-    fn base_headers(
+    pub(crate) fn base_headers(
         client_info: &AnisetteClientInfo,
         sms: bool,
     ) -> Result<reqwest::header::HeaderMap, Report> {
@@ -286,6 +286,10 @@ impl GrandSlam {
             "X-Apple-App-Info",
             HeaderValue::from_static("com.apple.gs.xcode.auth"),
         );
+        // Apple's edge serves at most two requests per connection since
+        // 2026-08-31. Close after every request so the next one is a new
+        // connection and never lands on an exhausted one.
+        headers.insert("Connection", HeaderValue::from_static("close"));
 
         Ok(headers)
     }
@@ -306,6 +310,15 @@ impl GrandSlam {
         let client = ClientBuilder::new()
             .add_root_certificate(cert)
             .http1_title_case_headers()
+            // Apple's gsa.apple.com edge began serving at most two requests per
+            // TCP connection around 2026-08-31, refusing the third and later
+            // requests on a reused keep-alive connection with an edge error
+            // (503, or the empty idmsa web 403 on the /auth 2FA endpoints). The
+            // sign-in plus the 2FA steps are well past two requests, so every
+            // 2FA request was landing on an exhausted pooled connection and
+            // being refused. Giving every request its own fresh connection is
+            // the fix (matches AltSign PR #52). Do not pool idle connections.
+            .pool_max_idle_per_host(0)
             .danger_accept_invalid_certs(debug)
             .connection_verbose(debug)
             .build()?;

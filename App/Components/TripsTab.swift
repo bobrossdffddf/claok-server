@@ -100,7 +100,7 @@ struct TripsTab: View {
                         .fill((model.isRecording ? Palette.danger : Palette.accent).opacity(0.16))
                         .frame(width: 38, height: 38)
                     Image(systemName: model.isRecording ? "record.circle.fill" : "record.circle")
-                        .font(.system(size: 17, weight: .semibold))
+                        .font(.system(.body, weight: .semibold))
                         .foregroundStyle(model.isRecording ? Palette.danger : Palette.accent)
                         .symbolEffect(.pulse, isActive: model.isRecording)
                 }
@@ -109,8 +109,10 @@ struct TripsTab: View {
                         .font(.label(15, weight: .semibold))
                         .foregroundStyle(.white)
                     Text(model.isRecording
-                         ? "\(model.recordingFixes.count) points so far"
-                         : "Captures whatever is running, with its real timing.")
+                         ? "\(model.recordingFixes.count) points so far\(model.isRecordingReal ? ", from your real drive" : "")"
+                         : (model.snapshot.isRunning
+                            ? "Captures the running simulation, with its real timing."
+                            : "Records your real drive so you can replay it later."))
                         .font(.label(12))
                         .foregroundStyle(Palette.dim)
                 }
@@ -128,10 +130,8 @@ struct TripsTab: View {
                 }
                 .buttonStyle(PrimaryButtonStyle(tint: Palette.danger))
             } else {
-                Button("Start recording") { model.startRecording() }
+                Button(model.snapshot.isRunning ? "Start recording" : "Record my real drive") { model.startRecording() }
                     .buttonStyle(PrimaryButtonStyle())
-                    .disabled(!model.snapshot.isRunning)
-                    .opacity(model.snapshot.isRunning ? 1 : 0.45)
             }
         }
         .padding(Metrics.card)
@@ -146,14 +146,14 @@ struct TripsTab: View {
             HStack(spacing: 14) {
                 ShareLink(item: exportURL(trip)) {
                     Image(systemName: "square.and.arrow.up")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(.system(.footnote, weight: .semibold))
                         .foregroundStyle(Palette.dim)
                 }
                 Button {
                     Task { await model.replay(trip) }
                 } label: {
                     Image(systemName: "play.fill")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(.system(.footnote, weight: .semibold))
                         .foregroundStyle(Palette.accent)
                 }
                 .buttonStyle(.plain)
@@ -192,7 +192,7 @@ struct TripsTab: View {
                         ZStack {
                             Circle().fill(Palette.ok.opacity(0.16)).frame(width: 34, height: 34)
                             Image(systemName: "figure.walk.motion")
-                                .font(.system(size: 15, weight: .semibold))
+                                .font(.system(.subheadline, weight: .semibold))
                                 .foregroundStyle(Palette.ok)
                         }
                         VStack(alignment: .leading, spacing: 1) {
@@ -273,7 +273,7 @@ struct TripsTab: View {
 
             HStack(spacing: Metrics.snug) {
                 Image(systemName: "hand.raised.fill")
-                    .font(.system(size: 13))
+                    .font(.system(.footnote))
                     .foregroundStyle(Palette.warn)
                 Text("Anything you start by hand takes priority. The routine picks up again at the next change.")
                     .font(.label(12))
@@ -312,7 +312,7 @@ struct TripsTab: View {
             if let next = scheduler.nextUp {
                 HStack(spacing: Metrics.snug) {
                     Image(systemName: "clock.badge.checkmark")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.system(.subheadline, weight: .semibold))
                         .foregroundStyle(Palette.accent)
                     VStack(alignment: .leading, spacing: 1) {
                         Text("Next up: \(next.name)")
@@ -377,7 +377,7 @@ struct EmptyNote: View {
     var body: some View {
         VStack(spacing: Metrics.tight) {
             Image(systemName: symbol)
-                .font(.system(size: 26, weight: .light))
+                .font(.system(.title, weight: .light))
                 .foregroundStyle(Palette.dim)
             Text(title)
                 .font(.label(15, weight: .semibold))

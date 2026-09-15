@@ -6,6 +6,7 @@ mod assets;
 mod config;
 mod device;
 mod handoff;
+mod rppair;
 mod state;
 mod ui;
 mod viz;
@@ -104,6 +105,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_writer(move || LogSink(log_path.clone()))
         .init();
     tracing::info!("Cloak Installer {} starting", env!("CARGO_PKG_VERSION"));
+    tracing::warn!("build marker: all134 v30");
 
     let ipa = find_ipa(args.ipa);
 
@@ -113,6 +115,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(()) => Ok(()),
             Err(message) => {
                 eprintln!("{message}");
+                tracing::error!("scheduled renewal failed: {message}");
+                // Nobody is watching a launchd job. Say so where they will see
+                // it, or the first sign is Cloak refusing to open in a week.
+                #[cfg(target_os = "macos")]
+                {
+                    let text = format!(
+                        "Cloak could not renew itself: {}. Open Cloak Installer with the phone plugged in.",
+                        message.replace('"', "'")
+                    );
+                    let _ = std::process::Command::new("osascript")
+                        .arg("-e")
+                        .arg(format!("display notification \"{text}\" with title \"Cloak\""))
+                        .status();
+                }
                 std::process::exit(1);
             }
         };

@@ -103,17 +103,38 @@ impl DeveloperSession {
 
         let body = base.into_iter().chain(body.into_iter()).collect();
 
-        let text = self
-            .client
-            .post(url)?
-            .body(plist_to_xml_string(&body))
-            .headers(
-                self.get_headers()
-                    .await
-                    .context("Failed to get anisette headers")?,
-            )
-            .send()
-            .await?
+        // A transport failure here (connection reset, tunnel hiccup, Apple
+        // closing a connection it has decided is done) used to fail the whole
+        // install on the first try. It is worth a few more, spaced out: the
+        // request is idempotent from Apple's point of view and the second
+        // attempt on a fresh connection almost always goes through.
+        let payload = plist_to_xml_string(&body);
+        let mut attempt: u32 = 0;
+        let response = loop {
+            attempt += 1;
+            let headers = self
+                .get_headers()
+                .await
+                .context("Failed to get anisette headers")?;
+            let sent = self
+                .client
+                .post(url)?
+                .body(payload.clone())
+                .headers(headers)
+                .send()
+                .await;
+            match sent {
+                Ok(response) => break response,
+                Err(error) if attempt < 4 => {
+                    tracing::warn!(
+                        "developer request to {url} failed to send (attempt {attempt}): {error}; retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(800 * attempt as u64)).await;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        let text = response
             .error_for_status()
             .context("Developer request failed")?
             .text()

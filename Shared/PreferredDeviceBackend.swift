@@ -29,8 +29,13 @@ public actor PreferredDeviceBackend: DeviceBackend {
         }
     }
 
-    /// Whether a lockdown record is on hand.
-    public static var hasLockdownRecord: Bool { PairingStore().hasRecord }
+    /// Whether a lockdown record is on hand and this iOS can use it. From
+    /// iOS 27 the phone refuses connections to its own lockdown port even via
+    /// the reflector, so the record is worthless there and the outward pairing
+    /// route is used instead.
+    public static var hasLockdownRecord: Bool {
+        PairingPlan.currentMajor < PairingPlan.pairableHostMajor && PairingStore().hasRecord
+    }
 
     public var usingRemotePairing: Bool {
         !Self.hasLockdownRecord
@@ -45,6 +50,21 @@ public actor PreferredDeviceBackend: DeviceBackend {
         // Nothing works without the reflector, on either route.
         _ = await TunnelGate.ensureUp()
 
+        // From iOS 26 the remote pairing is the one that is known to work,
+        // and the lockdown attempt is slow to fail (several handshakes on
+        // several addresses). So when a remote record exists it goes first
+        // there, and lockdown is the fallback rather than the other way round.
+        if PairingPlan.currentMajor >= PairingPlan.outwardPairingMajor,
+           RemotePairingBackend.storedRecord != nil {
+            do {
+                try await remote.connect(pairing: pairing)
+                chosen = remote
+                return
+            } catch {
+                guard Self.hasLockdownRecord else { throw error }
+            }
+        }
+
         if Self.hasLockdownRecord {
             do {
                 try await lockdown.connect(pairing: pairing)
@@ -52,12 +72,24 @@ public actor PreferredDeviceBackend: DeviceBackend {
                 return
             } catch {
                 // Falling through to the other route is only worth doing when
-                // there is one; otherwise the lockdown error is the real
-                // answer and should be what the user sees.
-                guard RemotePairingBackend.storedRecord != nil else { throw error }
+                // there is one. Otherwise say what actually fixes it: some
+                // iOS builds below 27 (26.4 onwards, going by SideStore's
+                // reports) refuse their own lockdown port the way 27 does, and
+                // the way out is the same pairing the phone does for itself.
+                guard RemotePairingBackend.storedRecord != nil else {
+                    throw DeviceBackendError.handshakeFailed(
+                        error.localizedDescription
+                            + "\n\nThis iPhone did not answer the direct route. Open Settings in Cloak and choose Pair without a computer; Cloak will use that pairing from then on."
+                    )
+                }
             }
         }
 
+        guard RemotePairingBackend.storedRecord != nil else {
+            throw DeviceBackendError.handshakeFailed(
+                "This phone has not paired with Cloak yet. Open Settings in Cloak and pair without a computer."
+            )
+        }
         try await remote.connect(pairing: pairing)
         chosen = remote
     }

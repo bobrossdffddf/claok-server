@@ -102,6 +102,8 @@ public struct TunnelStartPayload: Codable, Sendable {
     /// How far a held position is allowed to drift, in metres. A phone left on
     /// a desk moves; one pinned to a single coordinate for hours does not.
     public var dwellRadius: Double
+    /// Set when this drive is a SHIELD run: the route driven at the limit.
+    public var shieldMode: ShieldSettings.Mode?
 
     public init(
         points: [Coordinate],
@@ -113,7 +115,8 @@ public struct TunnelStartPayload: Codable, Sendable {
         loop: Bool,
         seed: UInt64,
         label: String,
-        dwellRadius: Double = 6
+        dwellRadius: Double = 6,
+        shieldMode: ShieldSettings.Mode? = nil
     ) {
         self.points = points
         self.postedLimits = postedLimits
@@ -125,6 +128,7 @@ public struct TunnelStartPayload: Codable, Sendable {
         self.seed = seed
         self.label = label
         self.dwellRadius = dwellRadius
+        self.shieldMode = shieldMode
     }
 
     public static func fixed(_ coordinate: Coordinate, label: String, dwellRadius: Double = 6) -> TunnelStartPayload {

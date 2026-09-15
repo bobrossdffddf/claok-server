@@ -38,7 +38,9 @@ final class DriveActivityController {
             progress: snapshot.progress,
             distanceRemaining: snapshot.distanceRemaining,
             isPaused: snapshot.isPaused,
-            startedAt: snapshot.startedAt ?? .now
+            startedAt: snapshot.startedAt ?? .now,
+            realSpeedMph: snapshot.shieldRealSpeed.map(Speed.toMph),
+            holdingBackMetres: snapshot.shieldHoldingBack
         )
 
         if let running = activity {

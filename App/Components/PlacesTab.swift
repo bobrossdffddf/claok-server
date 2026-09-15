@@ -31,7 +31,7 @@ struct PlacesTab: View {
                                 subtitle: item.placemark.title,
                                 showsDivider: index < results.count - 1) {
                                 Image(systemName: "arrow.up.forward")
-                                    .font(.system(size: 12, weight: .semibold))
+                                    .font(.system(.caption, weight: .semibold))
                                     .foregroundStyle(Palette.dim)
                             }
                             .contentShape(.rect)
@@ -58,7 +58,7 @@ struct PlacesTab: View {
                                 subtitle: place.subtitle.isEmpty ? nil : place.subtitle,
                                 showsDivider: index < places.count - 1) {
                                 Image(systemName: "arrow.up.forward")
-                                    .font(.system(size: 12, weight: .semibold))
+                                    .font(.system(.caption, weight: .semibold))
                                     .foregroundStyle(Palette.dim)
                             }
                             .contentShape(.rect)

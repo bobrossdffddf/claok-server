@@ -30,17 +30,25 @@ struct PairingPlanTests {
         }
     }
 
-    /// Lockdown is tried first everywhere, because it asks least of the phone:
-    /// a fixed port, no discovery, no Wi-Fi.
-    @Test func lockdownIsAlwaysTriedFirstWithoutARecord() {
+    /// Below 27 lockdown is tried first, because it asks least of the phone:
+    /// a fixed port, no discovery, no Wi-Fi. From 27 the phone refuses its own
+    /// lockdown port even through the reflector (measured on a real device),
+    /// so it is not tried at all there and the outward route goes first.
+    @Test func firstRouteMatchesWhatThePhoneWillAnswer() {
         for major in Self.versions {
             let routes = PairingPlan.routes(iOSMajor: major, hasStoredRecord: false)
-            #expect(routes.first == .lockdown, "iOS \(major) did not try lockdown first")
+            if major >= PairingPlan.pairableHostMajor {
+                #expect(routes.first == .pairableHost, "iOS \(major) did not try outward pairing first")
+                #expect(!routes.contains(.lockdown), "iOS \(major) still tries the refused lockdown port")
+            } else {
+                #expect(routes.first == .lockdown, "iOS \(major) did not try lockdown first")
+            }
         }
     }
 
-    /// The outward-pairing flow does not exist before 27, so offering it there
-    /// would be offering something that cannot happen.
+    /// The outward-pairing flow only exists from 27: below that there is no
+    /// Devices list for the phone to pair from, so offering it is offering
+    /// something that cannot happen.
     @Test func pairableHostOnlyExistsFromTwentySeven() {
         for major in Self.versions {
             let routes = PairingPlan.routes(iOSMajor: major, hasStoredRecord: false)
@@ -52,11 +60,13 @@ struct PairingPlanTests {
         }
     }
 
-    /// Whatever else happens, there is always a last resort.
-    @Test func discoveryIsAlwaysTheFallback() {
+    /// Whatever else happens, there is always a last resort: discovery
+    /// everywhere, and on 26 the outward route sits behind it.
+    @Test func thereIsAlwaysAFallback() {
         for major in Self.versions {
             let routes = PairingPlan.routes(iOSMajor: major, hasStoredRecord: false)
-            #expect(routes.last == .discovery, "iOS \(major) has no fallback")
+            #expect(routes.contains(.discovery), "iOS \(major) has no fallback")
+            #expect(routes.count >= 2, "iOS \(major) has only one route")
         }
     }
 

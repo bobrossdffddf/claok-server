@@ -52,7 +52,14 @@ final class ReflectorGate {
         Reflector.hasBuiltInTunnel ? .builtIn : .localDevVPN
     }
 
-    var localDevVPNInstalled: Bool {
+    /// iOS answers canOpenURL from a cache it does not always refresh when
+    /// an app is installed while this one is running, so this is sampled on
+    /// the same slow timer as the tunnel and published as state. Reading it
+    /// straight from a view body left onboarding saying "Not installed yet"
+    /// forever after somebody installed LocalDevVPN and came straight back.
+    private(set) var localDevVPNInstalled = false
+
+    private func probeLocalDevVPN() -> Bool {
         UIApplication.shared.canOpenURL(URL(string: "\(Reflector.LocalDevVPN.scheme)://")!)
     }
 
@@ -68,6 +75,9 @@ final class ReflectorGate {
     }
 
     private func sample() {
+        let present = probeLocalDevVPN()
+        if present != localDevVPNInstalled { localDevVPNInstalled = present }
+
         let live = Reflector.isUp
         if live == isUp {
             disagreements = 0
@@ -86,6 +96,7 @@ final class ReflectorGate {
     /// Wire this into `TunnelGate` so shared code can ask for the reflector
     /// without knowing which app provides it.
     func install() {
+        localDevVPNInstalled = probeLocalDevVPN()
         watch()
         TunnelGate.install { [weak self] target in
             guard let self else { return false }

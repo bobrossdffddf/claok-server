@@ -57,6 +57,24 @@ public extension Coordinate {
         return offset(metersNorth: cos(theta) * distance, metersEast: sin(theta) * distance)
     }
 
+    /// Distance from this point to the straight segment a–b, in metres, and
+    /// how far along the segment (0...1) the nearest point lies. A local flat
+    /// projection around this point is accurate to well under a metre at the
+    /// distances involved (roads and routes, not continents).
+    func distance(toSegmentFrom a: Coordinate, to b: Coordinate) -> (metres: Double, fraction: Double) {
+        let kLat = Coordinate.earthRadius * .pi / 180
+        let kLon = kLat * cos(latitude * .pi / 180)
+        let ax = (a.longitude - longitude) * kLon, ay = (a.latitude - latitude) * kLat
+        let bx = (b.longitude - longitude) * kLon, by = (b.latitude - latitude) * kLat
+        let dx = bx - ax, dy = by - ay
+        let lengthSquared = dx * dx + dy * dy
+        guard lengthSquared > 0 else { return (sqrt(ax * ax + ay * ay), 0) }
+        var t = -(ax * dx + ay * dy) / lengthSquared
+        t = min(max(t, 0), 1)
+        let px = ax + t * dx, py = ay + t * dy
+        return (sqrt(px * px + py * py), t)
+    }
+
     func interpolated(to other: Coordinate, fraction: Double) -> Coordinate {
         let t = min(max(fraction, 0), 1)
         return Coordinate(

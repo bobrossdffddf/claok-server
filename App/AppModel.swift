@@ -1,4 +1,5 @@
 import Foundation
+import os
 import Observation
 import CoreLocation
 import SwiftUI
@@ -10,6 +11,26 @@ final class AppModel: NSObject {
     var snapshot = SimulationSnapshot.stopped
     var linkState = DeviceLinkState()
     var realPosition: Coordinate?
+
+    /// What CoreLocation is telling every app right now, this one included.
+    /// During a simulation this is the simulated fix as iOS delivers it, which
+    /// is the only honest answer to "will Life360 think I am driving": if
+    /// speed comes back as -1 here, no app on the phone is seeing a speed.
+    struct ObservedLocation: Equatable {
+        var speed: Double
+        var course: Double
+        var horizontalAccuracy: Double
+        var timestamp: Date
+        /// Speed worked out from this fix and the one before it, in m/s. This
+        /// is the number Life360 and friends actually use when iOS hands them
+        /// -1, so it is the number that says whether a drive registers.
+        var derivedSpeed: Double?
+        var derivedCourse: Double?
+        var coordinate: Coordinate
+    }
+    var observedLocation: ObservedLocation?
+    private static let locationLog = Logger(subsystem: "app.cloak.ios", category: "observed-location")
+    private static let driveLog = Logger(subsystem: "app.cloak.ios", category: "drive-plan")
     var isOnboarded: Bool
     var persona: DriverPersona = .normal
     var travelMode: TravelMode = .drive
@@ -26,8 +47,18 @@ final class AppModel: NSObject {
     var routeStatus: String?
     var recordingFixes: [SimulatedFix] = []
     var isRecording = false
+    /// True when the recording captures the phone's real movement rather than
+    /// a running simulation. Decided when recording starts: with nothing
+    /// simulating, it records the real drive.
+    var isRecordingReal = false
     /// How fast a simulated drive sits against the posted limits.
     var speedHelp = SpeedHelp.load()
+    var shield = ShieldSettings.load()
+    /// Road data around a SHIELD drive, refreshed as the car leaves the box.
+    private var shieldRoadBox: BoundingBox?
+    private var shieldRoadTask: Task<Void, Never>?
+    private let shieldRoadCache = RoadDataCache()
+    private let shieldOverpass = OverpassClient()
     var imageTransfer: String?
     var hasDeveloperImage = DeveloperImageBundle.isPresent
     var hasPairing = false
@@ -46,7 +77,7 @@ final class AppModel: NSObject {
     let reflector = ReflectorGate()
     let imageDelivery = ImageDelivery()
     private let engine = SimulationEngine()
-    private let pairingStore = PairingStore()
+    let pairingStore = PairingStore()
     private let routeBuilder = RouteBuilder()
     private let locationManager = CLLocationManager()
     private var pollTask: Task<Void, Never>?
@@ -69,6 +100,7 @@ final class AppModel: NSObject {
         // A copy handed over by the desktop installer counts as being paired,
         // and it arrives before the first launch finishes.
         PairingHandoff.adopt(into: pairingStore)
+        PairingHandoff.adoptRemoteRecord()
         hasPairing = pairingStore.hasRecord
         hasRemotePairing = RemotePairingBackend.storedRecord != nil
     }
@@ -76,12 +108,25 @@ final class AppModel: NSObject {
     /// True once this phone can reach its own developer services, by either
     /// route: the record it earned by pairing with itself, or one imported from
     /// a Mac.
-    var hasAnyPairing: Bool { hasPairing || hasRemotePairing }
+    /// The installer's lockdown record is only usable below iOS 27; from 27 the
+    /// phone refuses its own lockdown port, so only the record the phone earned
+    /// by pairing outward counts. Without this the onboarding skipped the one
+    /// step that could make the phone work.
+    var hasAnyPairing: Bool {
+        if PairingPlan.currentMajor >= PairingPlan.pairableHostMajor {
+            return hasRemotePairing
+        }
+        return hasPairing || hasRemotePairing
+    }
 
     var isSetupComplete: Bool { hasAnyPairing && hasDeveloperImage }
 
     func onAppear() {
-        locationManager.requestAlwaysAuthorization()
+        // No permission prompt here. Onboarding has a step that explains why
+        // Cloak wants location and asks then; asking the moment the app opens
+        // (it used to fire over the licence screen) is what Apple's guidelines
+        // tell apps not to do, and people say no to prompts they do not
+        // understand. `requestAlwaysLocation()` is the one place that asks.
         applyLocationAuthorization(locationManager.authorizationStatus)
         startPolling()
     }
@@ -110,6 +155,11 @@ final class AppModel: NSObject {
         snapshot.isRunning || isRecording || geofence.isEnabled
     }
 
+    var isShielding: Bool {
+        if case .shield = snapshot.mode { return snapshot.isRunning }
+        return false
+    }
+
     /// Starts and stops location to match.
     ///
     /// This used to switch on the moment permission was granted and never
@@ -136,8 +186,12 @@ final class AppModel: NSObject {
 
         locationManager.desiredAccuracy = kCLLocationAccuracyBest
         locationManager.pausesLocationUpdatesAutomatically = false
-        locationManager.allowsBackgroundLocationUpdates =
-            (locationAuthorization == .authorizedAlways)
+        // While Using is enough: with the location background mode declared,
+        // iOS keeps a When In Use app running in the background as long as it
+        // is receiving fixes, and shows the blue pill while it does. Gating
+        // this on Always meant anyone who picked the other button had the
+        // drive freeze the moment they switched to Life360 to look.
+        locationManager.allowsBackgroundLocationUpdates = true
         locationManager.showsBackgroundLocationIndicator = true
         locationManager.startUpdatingLocation()
         locationActive = true
@@ -184,7 +238,7 @@ final class AppModel: NSObject {
         updateLocationNeed()
         snapshot = await engine.current
         liveActivity.sync(with: snapshot)
-        if isRecording, let fix = snapshot.fix {
+        if isRecording, !isRecordingReal, let fix = snapshot.fix {
             recordingFixes.append(fix)
         }
         if let message = snapshot.linkMessage, banner == nil {
@@ -334,7 +388,7 @@ final class AppModel: NSObject {
         }
     }
 
-    func startRoute() async {
+    func startRoute(shieldMode: ShieldSettings.Mode? = nil) async {
         guard routeWaypoints.count >= 2 else {
             banner = "Add at least two stops."
             return
@@ -355,16 +409,25 @@ final class AppModel: NSObject {
             let densified = plan.polyline.densified(spacing: 5)
             let limits = plan.metadata.limits(along: densified, fallback: travelMode == .drive ? .residential : .footway)
             let controls = plan.metadata.snappedControls(to: densified)
+            Self.driveLog.notice("route \(Int(densified.length))m, \(plan.metadata.segments.count) roads known (fallback: \(plan.metadata.wasFallback)), \(controls.count) controls on route")
+            if let lo = limits.min(), let hi = limits.max() {
+                let mean = limits.reduce(0, +) / Double(max(1, limits.count))
+                Self.driveLog.notice("limits mph min \(Int(Speed.toMph(lo))) max \(Int(Speed.toMph(hi))) mean \(Int(Speed.toMph(mean)))")
+            }
+            for control in controls {
+                Self.driveLog.notice("control \(control.kind.rawValue, privacy: .public) at \(Int(control.alongTrack))m \(control.coordinate.latitude),\(control.coordinate.longitude) minorOnly=\(control.appliesToMinorRoadOnly) signalled=\(control.isSignalled)")
+            }
             let payload = TunnelStartPayload(
                 points: densified.points,
                 postedLimits: limits,
                 controls: controls,
-                personaID: persona.id,
-                mode: travelMode,
-                playbackRate: playbackRate,
-                loop: loopRoute,
+                personaID: shieldMode.map { DriverPersona.shield(allowanceMph: $0.allowanceMph).id } ?? persona.id,
+                mode: shieldMode == nil ? travelMode : .drive,
+                playbackRate: shieldMode == nil ? playbackRate : 1,
+                loop: shieldMode == nil && loopRoute,
                 seed: UInt64.random(in: 1...UInt64.max),
-                label: routeWaypoints.last?.title ?? "Route"
+                label: routeWaypoints.last?.title ?? "Route",
+                shieldMode: shieldMode
             )
             await send(.start(payload))
         } catch let error as RouteBuilderError {
@@ -546,6 +609,107 @@ final class AppModel: NSObject {
         hasDeveloperImage = DeveloperImageBundle.isPresent
     }
 
+    // MARK: - SHIELD
+
+    func setShield(_ value: ShieldSettings) {
+        shield = value
+        value.save()
+    }
+
+    /// SHIELD drives the built route at the posted limit plus the chosen
+    /// allowance, whatever the car is really doing.
+    ///
+    /// It cannot follow the real car: while a simulation runs, iOS hands every
+    /// app on the phone the simulated fix, this one included, so the only real
+    /// position Cloak can know is the one from before it started. What it can
+    /// do is drive the road you are about to drive, at a speed nobody will
+    /// question, so start it as you pull out and it arrives shortly after you.
+    @discardableResult
+    func startShield() async -> String? {
+        // Press and go: if a route is set, drive it; otherwise generate one
+        // from where the phone is by following the roads it is on. No
+        // destination required.
+        if routeWaypoints.count >= 2 {
+            await startRoute(shieldMode: shield.mode)
+            return (snapshot.isRunning == false) ? banner : nil
+        }
+        return await startFreeShield()
+    }
+
+    /// SHIELD with no destination: read the roads around the car and build a
+    /// path that follows them from here, then drive it at the limit.
+    private func startFreeShield() async -> String? {
+        if locationAuthorization == .notDetermined { requestAlwaysLocation() }
+        let allowed = locationAuthorization == .authorizedAlways || locationAuthorization == .authorizedWhenInUse
+        guard allowed else { return "SHIELD needs location access so it can follow the road you are on." }
+
+        if realPosition == nil { locationManager.requestLocation() }
+        for _ in 0..<40 where realPosition == nil { try? await Task.sleep(for: .milliseconds(250)) }
+        guard let start = realPosition else { return "Waiting for a GPS fix. Try again in a moment." }
+
+        isBusy = true
+        routeStatus = "Reading the roads around you"
+        defer { isBusy = false; routeStatus = nil }
+
+        let box = BoundingBox(
+            minLatitude: start.latitude - 0.03, minLongitude: start.longitude - 0.04,
+            maxLatitude: start.latitude + 0.03, maxLongitude: start.longitude + 0.04
+        )
+        let cache = shieldRoadCache
+        let overpass = shieldOverpass
+        let metadata = await cache.metadata(for: box) { try await overpass.fetch(box: $0) }
+
+        let heading: Double? = observedLocation.map(\.course).flatMap { $0 >= 0 ? $0 : nil }
+        guard let points = AutoDrive.path(from: start, heading: heading, metres: 12_000, metadata: metadata),
+              points.count >= 2 else {
+            return "No roads found around you to follow. Try again where the map knows the streets."
+        }
+
+        let polyline = Polyline(points: points).densified(spacing: 5)
+        let limits = metadata.limits(along: polyline, fallback: .residential)
+        let controls = metadata.snappedControls(to: polyline)
+        let payload = TunnelStartPayload(
+            points: polyline.points,
+            postedLimits: limits,
+            controls: controls,
+            personaID: DriverPersona.shield(allowanceMph: shield.mode.allowanceMph).id,
+            mode: .drive,
+            playbackRate: 1,
+            loop: true,
+            seed: UInt64.random(in: 1...UInt64.max),
+            label: "SHIELD",
+            shieldMode: shield.mode
+        )
+        activePlan = nil
+        await send(.start(payload))
+        return (snapshot.isRunning == false) ? banner : nil
+    }
+
+    /// Fetches the roads around the car once it strays outside the last box.
+    /// About 1.5 km each way, cached on disk, so a commute costs a handful of
+    /// requests and a repeat of it costs none.
+    private func refreshShieldRoads(around point: Coordinate) {
+        if let box = shieldRoadBox,
+           point.latitude > box.minLatitude + 0.004, point.latitude < box.maxLatitude - 0.004,
+           point.longitude > box.minLongitude + 0.005, point.longitude < box.maxLongitude - 0.005 {
+            return
+        }
+        guard shieldRoadTask == nil else { return }
+        let box = BoundingBox(
+            minLatitude: point.latitude - 0.014, minLongitude: point.longitude - 0.018,
+            maxLatitude: point.latitude + 0.014, maxLongitude: point.longitude + 0.018
+        )
+        shieldRoadBox = box
+        let cache = shieldRoadCache
+        let overpass = shieldOverpass
+        let engine = self.engine
+        shieldRoadTask = Task {
+            let metadata = await cache.metadata(for: box) { try await overpass.fetch(box: $0) }
+            await engine.updateShieldRoads(metadata)
+            await MainActor.run { self.shieldRoadTask = nil }
+        }
+    }
+
     /// Takes effect on the next drive without anything being restarted, since
     /// the profile is read when a route is built.
     func setSpeedHelp(_ value: SpeedHelp) {
@@ -673,6 +837,9 @@ final class AppModel: NSObject {
     }
 
     func setGeofenceEnabled(_ enabled: Bool) {
+        // The guard reads the real position, so this is a moment location
+        // permission genuinely matters. Ask here if it was skipped earlier.
+        if enabled, locationAuthorization == .notDetermined { requestAlwaysLocation() }
         geofence.isEnabled = enabled
         persistGeofence()
     }
@@ -683,14 +850,19 @@ final class AppModel: NSObject {
     }
 
     func startRecording() {
+        if locationAuthorization == .notDetermined { requestAlwaysLocation() }
         recordingFixes = []
+        isRecordingReal = !snapshot.isRunning
         isRecording = true
+        updateLocationNeed()
     }
 
     func finishRecording() -> [SimulatedFix] {
         isRecording = false
+        isRecordingReal = false
         let captured = recordingFixes
         recordingFixes = []
+        updateLocationNeed()
         return captured
     }
 
@@ -719,8 +891,55 @@ extension AppModel: CLLocationManagerDelegate {
     nonisolated func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         guard let last = locations.last else { return }
         let coordinate = Coordinate(last.coordinate)
+        var observed = ObservedLocation(
+            speed: last.speed,
+            course: last.course,
+            horizontalAccuracy: last.horizontalAccuracy,
+            timestamp: last.timestamp,
+            derivedSpeed: nil,
+            derivedCourse: nil,
+            coordinate: coordinate
+        )
+        let real = RealFix(coordinate: coordinate, speed: max(0, last.speed), timestamp: last.timestamp)
         Task { @MainActor in
-            self.realPosition = coordinate
+            if let previous = self.observedLocation {
+                let gap = last.timestamp.timeIntervalSince(previous.timestamp)
+                if gap >= 0.5, gap <= 10 {
+                    observed.derivedSpeed = previous.coordinate.distance(to: coordinate) / gap
+                    observed.derivedCourse = previous.coordinate.bearing(to: coordinate)
+                }
+            }
+            if let derived = observed.derivedSpeed, Int(last.timestamp.timeIntervalSince1970) % 10 == 0 {
+                Self.locationLog.info("apps can infer \(derived * 2.23694, format: .fixed(precision: 1)) mph from movement (iOS speed field \(last.speed))")
+            }
+            // While a simulation runs, CoreLocation hands every app the
+            // simulated fix, this one included. Writing that into
+            // `realPosition` would put the real-location marker on top of
+            // the fake one and feed the geofence its own output.
+            if !self.snapshot.isRunning { self.realPosition = coordinate }
+            self.observedLocation = observed
+            if self.isRecording, self.isRecordingReal, last.horizontalAccuracy >= 0, last.horizontalAccuracy < 50 {
+                // A real trip, as driven. Course and speed come straight from
+                // CoreLocation when it has them, else from the previous point.
+                let previous = self.recordingFixes.last
+                let speed = last.speed >= 0 ? last.speed
+                    : previous.map { p in max(0, p.coordinate.distance(to: coordinate) / max(0.5, last.timestamp.timeIntervalSince(p.timestamp))) } ?? 0
+                let course = last.course >= 0 ? last.course
+                    : previous.map { $0.coordinate.bearing(to: coordinate) } ?? -1
+                if previous == nil || previous!.coordinate.distance(to: coordinate) >= 1 || last.timestamp.timeIntervalSince(previous!.timestamp) >= 1 {
+                    self.recordingFixes.append(SimulatedFix(
+                        coordinate: coordinate,
+                        speed: speed,
+                        course: course,
+                        altitude: last.altitude,
+                        horizontalAccuracy: last.horizontalAccuracy,
+                        timestamp: last.timestamp
+                    ))
+                }
+            }
+            if self.snapshot.isRunning {
+                Self.locationLog.notice("iOS delivered speed=\(last.speed, privacy: .public) course=\(last.course, privacy: .public) acc=\(last.horizontalAccuracy, privacy: .public)")
+            }
         }
     }
 

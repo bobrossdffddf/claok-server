@@ -23,14 +23,27 @@ struct SheetContent: View {
     @Environment(AppModel.self) private var model
     @Binding var selection: Coordinate?
     @Binding var detent: PresentationDetent
-    @State private var tab: SheetTab = .places
+    @State private var tab: SheetTab = {
+        #if DEBUG
+        if let name = ProcessInfo.processInfo.environment["CLOAK_TOUR_TAB"],
+           let chosen = SheetTab.allCases.first(where: { $0.rawValue.lowercased() == name.lowercased() }) {
+            return chosen
+        }
+        #endif
+        return .places
+    }()
     @Namespace private var tabNamespace
+    @State private var showsSigning = false
 
     var body: some View {
         VStack(spacing: 0) {
             LiveHeader()
                 .padding(.horizontal, 18)
                 .padding(.top, 10)
+                .padding(.bottom, 12)
+
+            SigningChip { showsSigning = true }
+                .padding(.horizontal, 18)
                 .padding(.bottom, 12)
 
             tabBar
@@ -48,8 +61,9 @@ struct SheetContent: View {
                 }
             }
         }
-        .background(Palette.ground.opacity(0.35))
+        .background(Palette.backdrop.opacity(0.5))
         .preferredColorScheme(.dark)
+        .sheet(isPresented: $showsSigning) { SigningView() }
     }
 
     private var tabBar: some View {
@@ -62,22 +76,23 @@ struct SheetContent: View {
                         if detent == .fraction(0.16) { detent = .fraction(0.42) }
                     }
                 } label: {
-                    VStack(spacing: 4) {
+                    VStack(spacing: 5) {
                         Image(systemName: item.symbol)
-                            .font(.system(size: 15, weight: .semibold))
+                            .font(.system(.body, weight: .semibold))
                             .symbolVariant(tab == item ? .fill : .none)
                         Text(item.rawValue)
                             .font(.label(11, weight: .semibold))
                     }
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 9)
+                    .padding(.vertical, 11)
                     .foregroundStyle(tab == item ? Palette.accent : Palette.dim)
                     .background {
-                        // One shape that slides between tabs, rather than four
-                        // that pop in and out.
                         if tab == item {
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .fill(Palette.accent.opacity(0.14))
+                            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                                .fill(Palette.accent.opacity(0.16))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                                        .strokeBorder(Palette.accent.opacity(0.25), lineWidth: 1))
                                 .matchedGeometryEffect(id: "tab", in: tabNamespace)
                         }
                     }
@@ -86,8 +101,8 @@ struct SheetContent: View {
                 .buttonStyle(.plain)
             }
         }
-        .padding(4)
-        .background(Palette.surface.opacity(0.55), in: .rect(cornerRadius: 16, style: .continuous))
+        .padding(5)
+        .background(Palette.ground.opacity(0.6), in: .rect(cornerRadius: 17, style: .continuous))
     }
 }
 
@@ -174,7 +189,56 @@ struct LiveHeader: View {
     }
 
     private func distanceText(_ meters: Double) -> String {
-        if meters < 950 { return "\(Int(meters.rounded())) m" }
-        return String(format: "%.1f km", meters / 1000)
+        Units.distance(meters)
+    }
+}
+
+
+/// The Vanish-style signing status, on the main panel so the seven day clock
+/// is never a surprise. Reads the real expiry out of the signature and opens
+/// the full Signing screen on tap.
+struct SigningChip: View {
+    var action: () -> Void
+    private var info: SignatureInfo? { SignatureInfo.fromBundle() }
+
+    private var tint: Color {
+        guard let info else { return Palette.dim }
+        if info.hasExpired { return Palette.danger }
+        return info.isUrgent ? Palette.warn : Palette.accent
+    }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                ZStack {
+                    Circle().stroke(Palette.raised, lineWidth: 3).frame(width: 34, height: 34)
+                    Circle()
+                        .trim(from: 0, to: CGFloat(info?.fractionLeft ?? 0))
+                        .stroke(tint, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                        .frame(width: 34, height: 34)
+                    Text("\(info?.daysLeft ?? 0)")
+                        .font(.readout(13, weight: .bold))
+                        .foregroundStyle(tint)
+                }
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(info.map { $0.hasExpired ? "Signature expired" : "\($0.daysLeft) \($0.daysLeft == 1 ? "day" : "days") left" } ?? "Signing")
+                        .font(.label(14, weight: .semibold))
+                        .foregroundStyle(.white)
+                    Text(info?.hasExpired == true ? "Tap to refresh now" : "Tap to refresh or set auto")
+                        .font(.label(11))
+                        .foregroundStyle(Palette.dim)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.system(.caption, weight: .semibold))
+                    .foregroundStyle(Palette.dim)
+            }
+            .padding(12)
+            .background(Palette.surface.opacity(0.7), in: .rect(cornerRadius: 14, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(tint.opacity(0.25), lineWidth: 1))
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
     }
 }

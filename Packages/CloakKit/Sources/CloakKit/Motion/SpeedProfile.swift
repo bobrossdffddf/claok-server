@@ -1,6 +1,10 @@
 import Foundation
 
 public struct SpeedProfile: Sendable {
+    /// No signal or crossing stops within this distance of the start of a
+    /// drive. See the note where stops are chosen.
+    public static let cleanStartDistance: Double = 1_200
+
     public let polyline: Polyline
     public let ceiling: [Double]
     public let stops: [StopEvent]
@@ -99,8 +103,13 @@ public enum SpeedProfileBuilder {
                         stops.append(StopEvent(alongTrack: control.alongTrack, dwell: generator.double(in: 1.0...2.5), kind: .giveWay))
                     }
                 case .crossing:
-                    if generator.chance(0.12) {
-                        stops.append(StopEvent(alongTrack: control.alongTrack, dwell: generator.double(in: 3.0...12.0), kind: .crossing))
+                    // A signalled crossing stops traffic now and then. A plain
+                    // one almost never does; stopping at random zebra crossings
+                    // was one of the things that looked wrong.
+                    if control.isSignalled, generator.chance(0.15) {
+                        stops.append(StopEvent(alongTrack: control.alongTrack, dwell: generator.double(in: 4.0...14.0), kind: .crossing))
+                    } else if !control.isSignalled, generator.chance(0.03) {
+                        stops.append(StopEvent(alongTrack: control.alongTrack, dwell: generator.double(in: 2.0...5.0), kind: .crossing))
                     }
                 case .roundabout:
                     applyCeiling(&ceiling, polyline: polyline, at: control.alongTrack, radius: 25, value: Speed.mph(15))
@@ -119,6 +128,12 @@ public enum SpeedProfileBuilder {
         for stop in stops {
             if let last = deduped.last, stop.alongTrack - last.alongTrack < 15 { continue }
             if stop.alongTrack < 10 || stop.alongTrack > polyline.length - 10 { continue }
+            // A clean start. iOS reports simulated fixes with no speed field,
+            // so apps that watch for driving (Life360 wants over 15 mph for
+            // more than half a mile) have to infer it from the position
+            // moving steadily. A red light in the first mile breaks that run
+            // before it counts, so the first stretch of a drive has none.
+            if mode == .drive, stop.kind != .stop, stop.alongTrack < SpeedProfile.cleanStartDistance { continue }
             deduped.append(stop)
         }
 

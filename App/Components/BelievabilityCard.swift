@@ -54,7 +54,7 @@ struct BelievabilityCard: View {
 
                     if !reading.isClean {
                         Image(systemName: "chevron.down")
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(.system(.caption, weight: .semibold))
                             .foregroundStyle(Palette.dim)
                             .rotationEffect(.degrees(expanded ? 180 : 0))
                     }

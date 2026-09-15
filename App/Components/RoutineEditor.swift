@@ -97,7 +97,7 @@ struct RoutineEditor: View {
                 ) {
                     VStack(alignment: .leading) {
                         HStack {
-                            Text("Drifts up to \(Int(drift)) m")
+                            Text("Drifts up to \(Units.feet(drift))")
                                 .font(.label(14))
                             Spacer()
                         }

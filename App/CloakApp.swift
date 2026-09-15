@@ -51,6 +51,30 @@ struct RootView: View {
 
     var body: some View {
         Group {
+            #if DEBUG
+            if let tour = UITour.screen {
+                tour
+            } else {
+                routed
+            }
+            #else
+            routed
+            #endif
+        }
+        .overlay(alignment: .top) {
+            if let update = licensing.update {
+                UpdateBanner(update: update)
+                    .padding(.horizontal, Metrics.regular)
+                    .padding(.top, Metrics.tight)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.snappy, value: licensing.update)
+    }
+
+    @ViewBuilder
+    private var routed: some View {
+        Group {
             switch licensing.state {
             case .checking:
                 LoadingScreen()
@@ -66,17 +90,30 @@ struct RootView: View {
                 }
             }
         }
-        .overlay(alignment: .top) {
-            if let update = licensing.update {
-                UpdateBanner(update: update)
-                    .padding(.horizontal, Metrics.regular)
-                    .padding(.top, Metrics.tight)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-            }
-        }
-        .animation(.snappy, value: licensing.update)
     }
 }
+
+#if DEBUG
+/// Opens one screen straight away for screenshots. Set CLOAK_TOUR in the
+/// environment (simctl passes SIMCTL_CHILD_CLOAK_TOUR) to one of the names
+/// below; CLOAK_TOUR_STEP picks an onboarding step by index. Debug builds only.
+enum UITour {
+    static var screen: AnyView? {
+        let env = ProcessInfo.processInfo.environment
+        guard let name = env["CLOAK_TOUR"], !name.isEmpty else { return nil }
+        let step = Int(env["CLOAK_TOUR_STEP"] ?? "") ?? 0
+        switch name {
+        case "license": return AnyView(LicenseView())
+        case "onboarding": return AnyView(OnboardingView(startingAt: step))
+        case "map": return AnyView(MapScreen())
+        case "settings": return AnyView(SettingsView())
+        case "pair": return AnyView(PairWithoutComputerView())
+        case "diagnostics": return AnyView(DiagnosticsView())
+        default: return nil
+        }
+    }
+}
+#endif
 
 struct LoadingScreen: View {
     var body: some View {
@@ -97,7 +134,7 @@ struct UpdateBanner: View {
     var body: some View {
         HStack(spacing: Metrics.snug) {
             Image(systemName: update.required ? "exclamationmark.arrow.circlepath" : "arrow.down.circle.fill")
-                .font(.system(size: 18, weight: .semibold))
+                .font(.system(.body, weight: .semibold))
                 .foregroundStyle(update.required ? Palette.warn : Palette.accent)
 
             VStack(alignment: .leading, spacing: 1) {
@@ -117,7 +154,7 @@ struct UpdateBanner: View {
                     licensing.dismissUpdate()
                 } label: {
                     Image(systemName: "xmark")
-                        .font(.system(size: 11, weight: .bold))
+                        .font(.system(.caption2, weight: .bold))
                         .foregroundStyle(Palette.dim)
                         .padding(6)
                 }

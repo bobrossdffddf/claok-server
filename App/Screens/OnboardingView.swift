@@ -21,8 +21,17 @@ import CloakKit
 struct OnboardingView: View {
     @Environment(AppModel.self) private var model
 
-    @State private var plan: [Step] = [.welcome]
     @State private var index = 0
+
+    init(startingAt index: Int = 0) {
+        _index = State(initialValue: index)
+    }
+
+    /// Computed every render from the live state, so it is never empty or
+    /// stale on the first frame. It used to be built in a `.task` that ran
+    /// after the view appeared, which left every button clamping to step
+    /// zero, and doing nothing, until that task happened to run.
+    private var plan: [Step] { buildPlan() }
     @State private var showsRemotePairing = false
     @State private var showsScanner = false
     @State private var showsImporter = false
@@ -106,7 +115,6 @@ struct OnboardingView: View {
             }
         }
         .task {
-            plan = buildPlan()
             withAnimation(.smooth(duration: 0.9)) { glow = true }
         }
     }
@@ -175,7 +183,7 @@ struct OnboardingView: View {
             if index > 0 {
                 Button(action: back) {
                     Image(systemName: "chevron.left")
-                        .font(.system(size: 14, weight: .bold))
+                        .font(.system(.footnote, weight: .bold))
                         .foregroundStyle(Palette.dim)
                         .frame(width: 32, height: 32)
                         .background(Circle().fill(Palette.surface))
@@ -282,6 +290,13 @@ struct OnboardingView: View {
                         model.reflector.openAppStoreForLocalDevVPN()
                     }
                     .buttonStyle(QuietButtonStyle())
+
+                    // The check above can lag behind an install iOS has not
+                    // told us about yet. The next step opens LocalDevVPN for
+                    // real, which is the authoritative test, so never hold
+                    // anyone here on the strength of a stale answer.
+                    Button("I have installed it, continue") { advance() }
+                        .buttonStyle(QuietButtonStyle())
                 } else {
                     Button("Continue") { advance() }
                         .buttonStyle(PrimaryButtonStyle())
@@ -347,14 +362,54 @@ struct OnboardingView: View {
 
     private var trust: some View {
         let paired = model.hasAnyPairing
+        let outward = RemotePairing.usesPairableHost
 
-        return page(symbol: "hand.tap.fill", title: "Tap Trust on this phone") {
-            Text("Cloak asks this phone to pair with itself. iOS puts its own alert on screen, the same one it shows when you plug into a computer.")
+        return page(
+            symbol: "hand.tap.fill",
+            title: outward ? "Pair this phone with Cloak" : "Tap Trust on this phone"
+        ) {
+            if outward {
+                Text("From iOS 27 the phone pairs outward, to a computer that says it is pairable. Cloak says it is one. It shows a six digit code, you type it into the iOS prompt, and the pairing is kept for good, even across reinstalls.")
+                Text("Wi-Fi only has to be switched on. It does not need to join a network, so this works on cellular.")
+            } else {
+                Text("Cloak asks this phone to pair with itself. iOS puts its own alert on screen, the same one it shows when you plug into a computer.")
+            }
         } actions: {
             VStack(spacing: Metrics.snug) {
                 liveCheck(title: paired ? "Paired with this phone" : "Not paired yet", done: paired)
 
-                if !paired {
+                if !paired && outward {
+                    // The tunnel has to be running before pairing can begin:
+                    // without it iOS resets the connection before a byte comes
+                    // back, and the failure reads as though pairing is broken.
+                    let tunnelUp = model.reflector.isUp
+                    liveCheck(title: tunnelUp ? "Tunnel is running" : "Tunnel is off", done: tunnelUp)
+
+                    tapList([
+                        "Tap Start below and leave Cloak open.",
+                        "Open Settings, Privacy & Security, Developer Mode. Under Other Devices tap \"\(RemotePairing.hostNameForDisplay)\".",
+                        "Type the six digit code Cloak shows you.",
+                    ])
+
+                    if tunnelUp {
+                        Button("Start") { showsRemotePairing = true }
+                            .buttonStyle(PrimaryButtonStyle())
+                    } else {
+                        Button("Turn the tunnel on first") {
+                            Task { _ = await model.ensureTunnelUp() }
+                        }
+                        .buttonStyle(PrimaryButtonStyle())
+                    }
+
+                    Menu {
+                        Button("Scan a QR code from a Mac") { showsScanner = true }
+                        Button("Import a file") { showsImporter = true }
+                    } label: {
+                        Text("I have a file from a computer")
+                            .font(.label(13, weight: .medium))
+                            .foregroundStyle(Palette.dim)
+                    }
+                } else if !paired {
                     tapList([
                         "Tap Start below.",
                         "An alert appears asking whether to trust this computer. Tap Trust.",
@@ -596,7 +651,7 @@ struct OnboardingView: View {
             ZStack {
                 Circle().fill(Palette.accent.opacity(0.13)).frame(width: 72, height: 72)
                 Image(systemName: symbol)
-                    .font(.system(size: 29, weight: .semibold))
+                    .font(.system(.title, weight: .semibold))
                     .foregroundStyle(Palette.accent)
             }
 

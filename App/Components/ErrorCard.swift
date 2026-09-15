@@ -15,7 +15,7 @@ struct ErrorCard: View {
         VStack(alignment: .leading, spacing: Metrics.snug) {
             HStack(spacing: 10) {
                 Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.system(.subheadline, weight: .semibold))
                     .foregroundStyle(Palette.warn)
                 Text(friendly.headline)
                     .font(.label(16, weight: .semibold))
@@ -35,7 +35,7 @@ struct ErrorCard: View {
                     HStack(spacing: 4) {
                         Text(showsDetail ? "Hide detail" : "Show detail")
                         Image(systemName: "chevron.down")
-                            .font(.system(size: 10, weight: .bold))
+                            .font(.system(.caption2, weight: .bold))
                             .rotationEffect(.degrees(showsDetail ? 180 : 0))
                     }
                     .font(.label(12, weight: .semibold))
@@ -59,7 +59,7 @@ struct ErrorCard: View {
             if showsDetail {
                 ScrollView(.vertical) {
                     Text(friendly.technical)
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.system(.caption2, design: .monospaced))
                         .foregroundStyle(Palette.dim)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -84,22 +84,52 @@ struct WifiNotice: View {
     var compact = false
 
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "wifi.slash")
-                .font(.system(size: compact ? 15 : 18, weight: .semibold))
-                .foregroundStyle(Palette.warn)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                Image(systemName: "antenna.radiowaves.left.and.right")
+                    .font(.system(compact ? .subheadline : .body, weight: .semibold))
+                    .foregroundStyle(Palette.warn)
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Wi-Fi is off")
-                    .font(.label(compact ? 14 : 15, weight: .semibold))
-                    .foregroundStyle(.white)
-                Text("Cloak cannot connect to iOS without it. It does not need to join a network, and Personal Hotspot works too.")
-                    .font(.label(12))
-                    .foregroundStyle(Palette.dim)
-                    .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("No local network")
+                        .font(.label(compact ? 14 : 15, weight: .semibold))
+                        .foregroundStyle(.white)
+                    Text("Cloak reaches iOS over a local network. On cellular, turn on Personal Hotspot and it makes one, no Wi-Fi needed. Or switch Wi-Fi on without joining anything.")
+                        .font(.label(12))
+                        .foregroundStyle(Palette.dim)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 0)
             }
 
-            Spacer(minLength: 0)
+            HStack(spacing: 8) {
+                Button {
+                    if let url = URL(string: "App-Prefs:INTERNET_TETHERING") { UIApplication.shared.open(url) }
+                    else if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+                } label: {
+                    Label("Turn on Hotspot", systemImage: "personalhotspot")
+                        .font(.label(13, weight: .semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(Palette.warn.opacity(0.9), in: .rect(cornerRadius: 12, style: .continuous))
+                        .foregroundStyle(Palette.ground)
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    if let url = URL(string: "App-Prefs:WIFI") { UIApplication.shared.open(url) }
+                    else if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+                } label: {
+                    Label("Wi-Fi", systemImage: "wifi")
+                        .font(.label(13, weight: .semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(Color.white.opacity(0.10), in: .rect(cornerRadius: 12, style: .continuous))
+                        .foregroundStyle(.white)
+                }
+                .buttonStyle(.plain)
+            }
         }
         .padding(compact ? 12 : Metrics.regular)
         .background(Palette.warn.opacity(0.10), in: .rect(cornerRadius: Metrics.radius, style: .continuous))

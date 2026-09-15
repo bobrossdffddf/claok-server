@@ -20,6 +20,7 @@ public struct RemotePairingStatus: Sendable, Equatable {
     public var identifier: String?
     public var txt: [String: String] = [:]
     public var chipId: UInt64 = 0
+    public var udid: String?
 
     public var isReady: Bool { state == "ready" }
     public var needsPin: Bool { state == "needs-pin" }
@@ -38,6 +39,8 @@ public actor RemotePairingBackend: DeviceBackend {
     public static let recordKey = "remotePairingRecord"
     public static let irkKey = "remotePairingAltIrk"
     public static let chipKey = "uniqueChipId"
+    public static let udidKey = "uniqueDeviceId"
+    public static var storedUdid: String? { AppGroup.defaults.string(forKey: udidKey) }
 
     private var opened = false
 
@@ -77,8 +80,8 @@ public actor RemotePairingBackend: DeviceBackend {
         if let txt = object["txt"] as? [String: String] { status.txt = txt }
 
         if let irk = status.altIrk, !irk.isEmpty,
-           AppGroup.defaults.string(forKey: irkKey) != irk {
-            AppGroup.defaults.set(irk, forKey: irkKey)
+           SecureDefaults.string(forKey: irkKey) != irk {
+            SecureDefaults.set(irk, forKey: irkKey)
         }
 
         // The RSD handshake is the only place the ECID turns up on this path,
@@ -87,30 +90,28 @@ public actor RemotePairingBackend: DeviceBackend {
             status.chipId = chip.uint64Value
             AppGroup.defaults.set(chip, forKey: chipKey)
         }
+        if let udid = object["udid"] as? String, !udid.isEmpty {
+            status.udid = udid
+            AppGroup.defaults.set(udid, forKey: udidKey)
+        }
 
         // Persist the record the moment it exists: after this the phone never
         // has to show a code again.
         if let record = status.record, !record.isEmpty,
-           AppGroup.defaults.string(forKey: recordKey) != record {
-            AppGroup.defaults.set(record, forKey: recordKey)
+           SecureDefaults.string(forKey: recordKey) != record {
+            SecureDefaults.set(record, forKey: recordKey)
         }
 
         return status
     }
 
-    public static var storedRecord: String? {
-        let value = AppGroup.defaults.string(forKey: recordKey)
-        return (value?.isEmpty == false) ? value : nil
-    }
+    public static var storedRecord: String? { SecureDefaults.string(forKey: recordKey) }
 
-    public static var storedIrk: String? {
-        let value = AppGroup.defaults.string(forKey: irkKey)
-        return (value?.isEmpty == false) ? value : nil
-    }
+    public static var storedIrk: String? { SecureDefaults.string(forKey: irkKey) }
 
     public static func forgetRecord() {
-        AppGroup.defaults.removeObject(forKey: recordKey)
-        AppGroup.defaults.removeObject(forKey: irkKey)
+        SecureDefaults.remove(forKey: recordKey)
+        SecureDefaults.remove(forKey: irkKey)
     }
 
     /// Advertise this app as a computer the phone can pair with. iOS 27 and
@@ -166,7 +167,12 @@ public actor RemotePairingBackend: DeviceBackend {
         leading.append("\(LocalAddresses.reflector6)|\(endpoint.port)")
 
         hosts.removeAll { leading.contains($0) }
-        return (leading + hosts).joined(separator: ",")
+        // The phone's own interface addresses (scoped link-local, from the
+        // remoted advertisement) go first: on iOS 26.4+ that is where the
+        // only open pairing service lives, and it needs no reflector at all.
+        let own = hosts.filter { $0.contains("%") }
+        let rest = hosts.filter { !$0.contains("%") }
+        return (own + leading + rest).joined(separator: ",")
     }
 
     public static let wifiOffMessage = """
@@ -180,6 +186,10 @@ public actor RemotePairingBackend: DeviceBackend {
 
         Once the link is up you can turn either back off and Cloak keeps running.
         """
+
+    public static func setRemotedPort(_ port: UInt16) {
+        _ = cloak_rp_set_rsd_port(port)
+    }
 
     public static func submitPin(_ pin: String) {
         let trimmed = pin.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -207,13 +217,21 @@ public actor RemotePairingBackend: DeviceBackend {
                 Self.wifiOffMessage + "\n\nInterfaces: " + RemotePairingDiscovery.interfaceReport())
         }
 
-        guard let endpoint = await RemotePairingDiscovery.find() else {
+        guard var endpoint = await RemotePairingDiscovery.find() else {
             throw DeviceBackendError.handshakeFailed(
                 "iOS is not advertising its pairing service, and Cloak has no remembered port to fall back on. Allow Cloak local network access in Settings and try again.")
         }
 
         guard reflector else {
             throw DeviceBackendError.handshakeFailed(Reflector.missingAdvice)
+        }
+
+        // The remoted port, for the route iOS 26.4+ still opens.
+        if let remoted = await RemotePairingDiscovery.findRemotedPort() {
+            _ = cloak_rp_set_rsd_port(remoted)
+            for extra in RemotePairingDiscovery.remotedCandidates(port: remoted) where !endpoint.hosts.contains(extra) {
+                endpoint.hosts.append(extra)
+            }
         }
 
         // The tunnel interface takes a moment to carry traffic after the VPN
@@ -345,6 +363,7 @@ public actor RemotePairingBackend: DeviceBackend {
     @discardableResult
     public static func startHost(name: String) -> Bool { false }
     public static func submitPin(_ pin: String) {}
+    public static func setRemotedPort(_ port: UInt16) {}
     public func connect(pairing: PairingRecord) async throws { throw DeviceBackendError.bridgeMissing }
     public func mountDeveloperImage() async throws { throw DeviceBackendError.bridgeMissing }
     public func openLocationService() async throws { throw DeviceBackendError.bridgeMissing }

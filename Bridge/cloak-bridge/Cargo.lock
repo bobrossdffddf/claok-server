@@ -602,8 +602,10 @@ version = "0.1.0"
 dependencies = [
  "idevice",
  "isideload",
+ "libc",
  "plist",
  "rootcause",
+ "serde",
  "serde_json",
  "tokio",
 ]
@@ -1982,8 +1984,6 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 [[package]]
 name = "isideload"
 version = "0.3.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba34523929a4605aeaac01f7489b1c73ac781a5dc13c18bdddf645b17935422d"
 dependencies = [
  "aes 0.9.3",
  "aes-gcm",

@@ -154,6 +154,32 @@ public struct Believability: Sendable, Equatable {
             ))
         }
 
+        // 7. Too short or too slow for a family app to call it a drive.
+        //    Those apps ignore the speed iOS reports for a simulated fix (it is
+        //    always -1) and work it out from movement, and they want roughly
+        //    half a mile at more than fifteen miles an hour before they say
+        //    "driving".
+        if mode == .drive {
+            let fastest = postedLimits.max() ?? 0
+            if distance < 1_600 {
+                tells.append(Tell(
+                    title: "Too short to count as a drive",
+                    detail: "Family apps want about half a mile of steady movement above fifteen miles an hour before they mark you as driving. This trip is only \(readable(distance)).",
+                    fix: "Pick a destination at least a mile away.",
+                    severity: .note,
+                    cost: 5
+                ))
+            } else if fastest > 0, fastest < 8 {
+                tells.append(Tell(
+                    title: "Too slow to count as a drive",
+                    detail: "Every road on this route is posted under twenty miles an hour, so the trip never reaches the speed family apps use to decide you are driving.",
+                    fix: "Route along a road with a higher limit for at least half a mile.",
+                    severity: .note,
+                    cost: 5
+                ))
+            }
+        }
+
         return Believability(score: tally(tells), tells: tells.sorted { $0.severity > $1.severity })
     }
 
@@ -201,7 +227,7 @@ public struct Believability: Sendable, Equatable {
         if let hardest = accelerations.map(abs).max(), hardest > 6 {
             tells.append(Tell(
                 title: "It changes speed instantly",
-                detail: "Speed jumps by \(String(format: "%.1f", hardest)) metres per second per second between two fixes. A car manages about two and a half.",
+                detail: "Speed jumps by \(String(format: "%.0f", Units.mph(hardest))) mph in one second between two fixes. A car manages about five.",
                 fix: "Lower the playback rate, which gives the engine room to accelerate properly.",
                 severity: .weak,
                 cost: 14
@@ -282,7 +308,6 @@ public struct Believability: Sendable, Equatable {
     }
 
     private static func readable(_ metres: Double) -> String {
-        if metres < 950 { return "\(Int(metres.rounded())) m" }
-        return String(format: "%.1f km", metres / 1000)
+        Units.distance(metres)
     }
 }

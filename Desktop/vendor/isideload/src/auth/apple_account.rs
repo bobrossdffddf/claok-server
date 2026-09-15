@@ -100,10 +100,10 @@ pub struct SMSTwoFactorError {
 /// same question, not a retry of a rejected answer, and none of them involves
 /// the password.
 const ASKING_AS: &[(Option<&str>, bool)] = &[
+    // One request, one identity. Apple's edge refuses extra requests on the
+    // same connection, and the 2FA endpoints are Xcode endpoints, so ask as
+    // Xcode once (matches AltSign) rather than bursting four identities.
     (Some("com.apple.gs.xcode.auth"), true),
-    (Some("com.apple.gs.idms.auth"), false),
-    (Some("com.apple.gs.appleid.auth"), false),
-    (None, false),
 ];
 
 fn described_as(headers: &HeaderMap, app_info: Option<&str>, xcode: bool) -> HeaderMap {
@@ -118,6 +118,78 @@ fn described_as(headers: &HeaderMap, app_info: Option<&str>, xcode: bool) -> Hea
         headers.remove("X-Xcode-Version");
     }
     headers
+}
+
+/// Log a 2FA request without leaking the long-lived-looking secrets. The
+/// identity token and the one time password are shown only as lengths; every
+/// other header is shown in full because that is what has to be diffed against
+/// a working client when Apple answers with an empty body.
+fn log_2fa_request(url: &str, app_info: Option<&str>, xcode: bool, headers: &HeaderMap) {
+    let mut parts: Vec<String> = Vec::new();
+    for (name, value) in headers {
+        let n = name.as_str();
+        let v = value.to_str().unwrap_or("?");
+        let shown = if n.eq_ignore_ascii_case("x-apple-identity-token")
+            || n.eq_ignore_ascii_case("x-apple-i-md")
+        {
+            format!("<{} chars>", v.len())
+        } else {
+            v.to_string()
+        };
+        parts.push(format!("{n}: {shown}"));
+    }
+    info!(
+        "2FA -> {url} as app_info={:?} xcode={} :: {}",
+        app_info,
+        xcode,
+        parts.join(" | ")
+    );
+}
+
+/// Write the complete request to a local replay file so it can be re-sent with
+/// curl one request at a time, without another sign-in. Session scoped values
+/// only; the file lives in the user's own log directory.
+fn dump_2fa_replay(method: &str, url: &str, headers: &HeaderMap, body: Option<&str>) {
+    const NL: char = 10 as char;
+    let Ok(home) = std::env::var("HOME") else { return };
+    let path = format!("{home}/Library/Logs/Cloak/2fa-replay.txt");
+    let mut out = String::new();
+    out.push_str(&format!("### {method} {url}{NL}"));
+    for (name, value) in headers {
+        out.push_str(&format!("-H '{}: {}'{NL}", name.as_str(), value.to_str().unwrap_or("?")));
+    }
+    if let Some(b) = body {
+        out.push_str(&format!("BODY {b}{NL}"));
+    }
+    out.push(NL);
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        use std::io::Write;
+        let _ = f.write_all(out.as_bytes());
+    }
+    warn!("2FA request written to {path}");
+}
+
+/// Put the Xcode clause back into a machine card for the 2FA endpoints.
+///
+/// The sign-in endpoint (GsService2) answers 503 to a card that names
+/// com.apple.dt.Xcode, so the installer strips it. The /auth two factor
+/// endpoints are the opposite: measured against Apple, the stripped
+/// AuthKit-only card is refused (403) and only the full Xcode card reaches the
+/// auth layer. So these requests, and only these, get the Xcode clause put
+/// back. The version matches the one the remote anisette helper mints its
+/// identity for, so card and identity still agree.
+fn card_with_xcode(card: &str) -> String {
+    if card.contains("com.apple.dt.Xcode") {
+        return card.to_string();
+    }
+    match card.rfind('>') {
+        Some(pos) => {
+            let mut out = card.to_string();
+            out.insert_str(pos, " (com.apple.dt.Xcode/25183.54.10)");
+            out
+        }
+        None => card.to_string(),
+    }
 }
 
 impl AppleAccount {
@@ -418,51 +490,29 @@ impl AppleAccount {
             .grandslam_client
             .get_url("trustedDeviceSecondaryAuth")?;
 
-        let base = self.build_2fa_headers(&anisette_data).await?;
+        let base = self.build_2fa_headers(&anisette_data, false).await?;
 
-        let mut response = None;
-        for (app_info, xcode) in ASKING_AS {
-            let attempt = self
-                .grandslam_client
-                .get(&request_code_url)?
-                .headers(described_as(&base, *app_info, *xcode))
-                .send()
-                .await
-                .context("Failed to request trusted device 2fa")?;
-
-            let refused = attempt.status() == reqwest::StatusCode::FORBIDDEN;
-            let described = app_info.unwrap_or("nothing in particular");
-            if refused {
-                debug!("Apple refused a code request made as {described}");
-                response = Some(attempt);
-                continue;
-            }
-            info!("Apple accepted a code request made as {described}");
-            response = Some(attempt);
-            break;
-        }
-
-        let response = response.ok_or_else(|| report!("No code request was made"))?;
+        let response = self
+            .twofa_send(reqwest::Method::GET, &request_code_url, base, None, &[])
+            .await
+            .context("Failed to request trusted device 2fa")?;
         let status = response.status();
         if !status.is_success() {
             // Worth keeping rather than discarding: this endpoint answers 403
             // with an empty body when it does not like the identity, and the
             // headers are the only place anything is ever explained.
-            let interesting: Vec<String> = response
+            let all_headers: Vec<String> = response
                 .headers()
                 .iter()
-                .filter(|(name, _)| {
-                    let name = name.as_str().to_ascii_lowercase();
-                    name.starts_with("x-apple") || name == "retry-after" || name == "location"
-                })
                 .map(|(name, value)| format!("{name}: {}", value.to_str().unwrap_or("?")))
                 .collect();
             let body = response.text().await.unwrap_or_default();
             let body = body.trim();
+            let shown = if body.len() > 2000 { &body[..2000] } else { body };
             warn!(
-                "Asking Apple to send a code answered {status}. headers [{}] body [{}]",
-                interesting.join(", "),
-                if body.len() > 300 { &body[..300] } else { body }
+                "Asking Apple to send a code answered {status}. ALL headers [{}] body [{}]",
+                all_headers.join(", "),
+                shown
             );
 
             // Not fatal. Apple usually pushes the code to the trusted devices
@@ -487,12 +537,15 @@ impl AppleAccount {
 
         let submit_code_url = self.grandslam_client.get_url("validateCode")?;
 
+        let base = self.build_2fa_headers(&anisette_data, false).await?;
         let res = self
-            .grandslam_client
-            .get(&submit_code_url)?
-            .headers(self.build_2fa_headers(&anisette_data).await?)
-            .header("security-code", code)
-            .send()
+            .twofa_send(
+                reqwest::Method::GET,
+                &submit_code_url,
+                base,
+                None,
+                &[("security-code", code)],
+            )
             .await
             .context("Failed to submit trusted device 2fa code")?
             .error_for_status()
@@ -558,12 +611,15 @@ impl AppleAccount {
             "mode": "sms"
         });
 
+        let base = self.build_2fa_headers(&anisette_data, true).await?;
         let res = self
-            .grandslam_client
-            .put_sms("https://gsa.apple.com/auth/verify/phone")?
-            .headers(self.build_2fa_headers(&anisette_data).await?)
-            .body(send_body.to_string())
-            .send()
+            .twofa_send(
+                reqwest::Method::PUT,
+                "https://gsa.apple.com/auth/verify/phone",
+                base,
+                Some(send_body.to_string()),
+                &[],
+            )
             .await
             .context("Failed to request SMS 2FA")?;
 
@@ -628,12 +684,15 @@ impl AppleAccount {
             "mode": "sms"
         });
 
+        let base = self.build_2fa_headers(&anisette_data, true).await?;
         let res = self
-            .grandslam_client
-            .post_sms("https://gsa.apple.com/auth/verify/phone/securitycode")?
-            .headers(self.build_2fa_headers(&anisette_data).await?)
-            .body(body.to_string())
-            .send()
+            .twofa_send(
+                reqwest::Method::POST,
+                "https://gsa.apple.com/auth/verify/phone/securitycode",
+                base,
+                Some(body.to_string()),
+                &[],
+            )
             .await
             .context("Failed to submit SMS 2FA code")?;
 
@@ -703,24 +762,11 @@ impl AppleAccount {
             .await
             .context("Failed to get anisette data for 2FA")?;
 
-        let base = self.build_2fa_headers(&anisette_data).await?;
-
-        let mut res = None;
-        for (app_info, xcode) in ASKING_AS {
-            let attempt = self
-                .grandslam_client
-                .get_sms("https://gsa.apple.com/auth")?
-                .headers(described_as(&base, *app_info, *xcode))
-                .send()
-                .await?;
-            let refused = attempt.status() == reqwest::StatusCode::FORBIDDEN;
-            res = Some(attempt);
-            if !refused {
-                break;
-            }
-        }
-
-        let res = res.ok_or_else(|| report!("No request for the numbers was made"))?;
+        let base = self.build_2fa_headers(&anisette_data, true).await?;
+        let res = self
+            .twofa_send(reqwest::Method::GET, "https://gsa.apple.com/auth", base, None, &[])
+            .await
+            .context("Failed to request trusted phone numbers")?;
         let status = res.status().as_u16();
         let text = res
             .text()
@@ -767,12 +813,76 @@ impl AppleAccount {
         bail!("Selected trusted number ID not found in trusted numbers");
     }
 
-    async fn build_2fa_headers(&self, anisette_data: &AnisetteData) -> Result<HeaderMap, Report> {
+    /// Send one 2FA/auth request, trying each identity in ASKING_AS until Apple
+    /// stops answering 401/403. Every attempt is one clean header set built from
+    /// the shared base headers, so the only thing that varies between attempts is
+    /// the identity, which is the whole point. The complete request is logged
+    /// before it is sent, and a refusal is a reason to try the next identity, not
+    /// to fail.
+    async fn twofa_send(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        base: HeaderMap,
+        body: Option<String>,
+        extra_headers: &[(&'static str, String)],
+    ) -> Result<reqwest::Response, Report> {
+        let mut last: Option<reqwest::Response> = None;
+        for (app_info, xcode) in ASKING_AS {
+            let mut headers = described_as(&base, *app_info, *xcode);
+            for (name, value) in extra_headers {
+                if let Ok(v) = HeaderValue::from_str(value) {
+                    headers.insert(*name, v);
+                }
+            }
+            log_2fa_request(url, *app_info, *xcode, &headers);
+            dump_2fa_replay(method.as_str(), url, &headers, body.as_deref());
+
+            let mut req = match method {
+                reqwest::Method::GET => self.grandslam_client.client.get(url),
+                reqwest::Method::PUT => self.grandslam_client.client.put(url),
+                reqwest::Method::POST => self.grandslam_client.client.post(url),
+                ref other => bail!("Unsupported 2FA method {other}"),
+            }
+            .headers(headers);
+            if let Some(ref b) = body {
+                req = req.body(b.clone());
+            }
+
+            let resp = req.send().await.context("2FA request failed")?;
+            let status = resp.status();
+            let described = app_info.unwrap_or("nothing in particular");
+            if status == reqwest::StatusCode::FORBIDDEN
+                || status == reqwest::StatusCode::UNAUTHORIZED
+            {
+                warn!("Apple refused the 2FA request to {url} made as {described} ({status})");
+                last = Some(resp);
+                continue;
+            }
+            info!("Apple accepted the 2FA request to {url} made as {described} ({status})");
+            return Ok(resp);
+        }
+        last.ok_or_else(|| report!("No 2FA request was made to {url}"))
+    }
+
+    async fn build_2fa_headers(
+        &self,
+        anisette_data: &AnisetteData,
+        json: bool,
+    ) -> Result<HeaderMap, Report> {
         // The full set, not the three the sign-in endpoint gets away with. The
         // sign-in endpoint carries the rest inside the request body; these
         // endpoints have no body, so anything left out of the headers is simply
         // absent, and Apple answers 403 with nothing in it.
-        let mut headers = HeaderMap::new();
+        //
+        // Built on top of the shared base headers so the request carries exactly
+        // one X-Mme-Client-Info, one User-Agent and so on. It must never be
+        // layered onto a request builder that has already applied base headers:
+        // that sends every value twice and, worse, leaves the hardcoded Xcode
+        // identity in place so described_as cannot strip it, which is why the
+        // plainer-client attempts were never actually tried.
+        let mut headers =
+            GrandSlam::base_headers(&self.grandslam_client.client_info, json)?;
         for (key, value) in anisette_data.get_full_headers() {
             headers.insert(
                 reqwest::header::HeaderName::from_bytes(key.as_bytes())?,
@@ -801,6 +911,16 @@ impl AppleAccount {
             "X-Apple-I-MD-RINFO",
             reqwest::header::HeaderValue::from_str(&anisette_data.routing_info)?,
         );
+
+        // AltSign's working 2FA requests identify as Xcode with an en-us
+        // language. The sign-in endpoint keeps the akd identity it works with;
+        // only these 2FA requests get the Xcode one.
+        headers.insert("User-Agent", HeaderValue::from_static("Xcode"));
+        headers.insert("Accept-Language", HeaderValue::from_static("en-us"));
+
+        // And the Xcode machine card, which is what the /auth endpoints accept.
+        let card = card_with_xcode(&self.grandslam_client.client_info.client_info);
+        headers.insert("X-Mme-Client-Info", HeaderValue::from_str(&card)?);
 
         Ok(headers)
     }

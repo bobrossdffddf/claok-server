@@ -44,4 +44,9 @@ isideload = { version = "0.3.17", default-features = false, features = ["install
 rootcause = "0.12"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util"] }
 plist = "1"
+serde = "1"
 serde_json = "1"
+libc = "0.2"
+
+[patch.crates-io]
+isideload = { path = "../../Desktop/vendor/isideload" }

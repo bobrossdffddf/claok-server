@@ -41,6 +41,7 @@ int cloak_rp_mount(const unsigned char *image, size_t image_len,
                    const unsigned char *manifest, size_t manifest_len,
                    unsigned long long chip_id);
 int cloak_rp_stop(void);
+int cloak_rp_set_rsd_port(unsigned short port);
 int cloak_rp_host_start(const char *name, const char *pairing_base64, const char *alt_irk_base64);
 
 /* Pairing this phone with itself over lockdown, no Bonjour involved. */

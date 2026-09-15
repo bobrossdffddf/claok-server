@@ -97,7 +97,7 @@ struct PairWithoutComputerView: View {
             ZStack {
                 Circle().fill(headerTint.opacity(0.18)).frame(width: 52, height: 52)
                 Image(systemName: headerSymbol)
-                    .font(.system(size: 22, weight: .semibold))
+                    .font(.system(.title2, weight: .semibold))
                     .foregroundStyle(headerTint)
             }
             VStack(alignment: .leading, spacing: 3) {
@@ -201,7 +201,7 @@ struct PairWithoutComputerView: View {
     private func tunnelCheck(_ title: String, done: Bool) -> some View {
         HStack(spacing: 10) {
             Image(systemName: done ? "checkmark.circle.fill" : "circle.dotted")
-                .font(.system(size: 15))
+                .font(.system(.subheadline))
                 .foregroundStyle(done ? Palette.ok : Palette.dim)
             Text(title)
                 .font(.label(13))
@@ -350,7 +350,7 @@ struct PairWithoutComputerView: View {
 
             if !pairing.services.isEmpty {
                 Text(pairing.services.joined(separator: "\n"))
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.system(.caption2, design: .monospaced))
                     .foregroundStyle(Palette.dim)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -436,13 +436,13 @@ struct PairWithoutComputerView: View {
                 switch state {
                 case .done:
                     Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 16))
+                        .font(.system(.callout))
                         .foregroundStyle(Palette.ok)
                 case .active:
                     ProgressView().controlSize(.small).tint(Palette.accent)
                 case .waiting:
                     Image(systemName: "circle.dotted")
-                        .font(.system(size: 16))
+                        .font(.system(.callout))
                         .foregroundStyle(Palette.dim)
                 }
             }

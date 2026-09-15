@@ -34,7 +34,37 @@ enum Command {
         manifest: Vec<u8>,
         chip_id: u64,
     },
+    /// Install a signed app bundle through this tunnel. On iOS 27 the phone
+    /// refuses its own lockdown port, so the tunnel the phone opened to
+    /// itself is the only door AFC and the installation proxy are behind.
+    Install {
+        app: std::path::PathBuf,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     Stop,
+}
+
+/// Sends a signed app through the live tunnel and waits for the install.
+/// Used by renewal; returns an error if no tunnel is up.
+pub async fn install_over_tunnel(app: std::path::PathBuf) -> Result<(), String> {
+    let (tx, rx) = oneshot::channel();
+    if send(Command::Install { app, reply: tx }) != RP_OK {
+        return Err("The phone's own tunnel is not up. Pair without a computer, then try again.".to_string());
+    }
+    match rx.await {
+        Ok(result) => result,
+        Err(_) => Err("The tunnel closed during the install.".to_string()),
+    }
+}
+
+async fn do_install(
+    handle: &mut idevice::tcp::handle::AdapterHandle,
+    handshake: &mut RsdHandshake,
+    app: &std::path::Path,
+) -> Result<(), String> {
+    isideload::sideload::install::install_app_rsd(handle, handshake, app, |_| {})
+        .await
+        .map_err(|error| format!("{error}"))
 }
 
 struct RpSession {
@@ -48,6 +78,20 @@ struct RpSession {
 }
 
 static SESSION: OnceLock<Arc<RpSession>> = OnceLock::new();
+
+/// Every address the app handed us for this attempt, so the tunnel port can
+/// be tried on all of them, not only the one the pairing went through.
+static TUNNEL_FALLBACK_HOSTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// The port Remote Service Discovery is advertised on, set from the app once
+/// Bonjour has resolved `_remoted._tcp`. Zero means the cable default.
+static RSD_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+
+#[no_mangle]
+pub extern "C" fn cloak_rp_set_rsd_port(port: u16) -> c_int {
+    RSD_PORT.store(port, std::sync::atomic::Ordering::Relaxed);
+    RP_OK
+}
 
 fn base64(input: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -135,8 +179,10 @@ fn set_state(session: &RpSession, value: serde_json::Value) {
 /// Everything a successful attempt hands back. The tunnel only lives as long as
 /// these do, so they all have to travel together.
 struct Link {
+    /// Kept alive for as long as the tunnel: dropping the pairing client
+    /// closes the control channel the tunnel was negotiated over.
     #[allow(dead_code)]
-    client: RemotePairingClient<RpPairingSocket<tokio::net::TcpStream>>,
+    client: Box<dyn std::any::Any + Send>,
     handle: idevice::tcp::handle::AdapterHandle,
     handshake: RsdHandshake,
     rsd_port: u16,
@@ -150,6 +196,49 @@ fn socket_target(host: &str, port: u16) -> String {
         format!("[{host}]:{port}")
     } else {
         format!("{host}:{port}")
+    }
+}
+
+/// Opens a TCP connection to `host:port`, where `host` may be a scoped IPv6
+/// address such as `fe80::1%anpi0`.
+///
+/// Rust's address parser does not understand the `%interface` suffix and
+/// getaddrinfo on iOS refuses it ("nodename nor servname provided"), which is
+/// how the one address the phone actually offers its services on was the one
+/// address that could not be dialled. The scope is turned into an interface
+/// index here and the socket is opened without any name lookup at all.
+async fn dial(host: &str, port: u16, timeout: Duration) -> Result<tokio::net::TcpStream, String> {
+    let target: std::net::SocketAddr = if let Some((address, scope)) = host.split_once('%') {
+        let v6: std::net::Ipv6Addr = address
+            .trim_matches(|c| c == '[' || c == ']')
+            .parse()
+            .map_err(|e| format!("bad address {host}: {e}"))?;
+        let index = match scope.parse::<u32>() {
+            Ok(number) => number,
+            Err(_) => {
+                let name = std::ffi::CString::new(scope).map_err(|_| "bad scope".to_string())?;
+                let index = unsafe { libc::if_nametoindex(name.as_ptr()) };
+                if index == 0 {
+                    return Err(format!("no interface called {scope}"));
+                }
+                index
+            }
+        };
+        std::net::SocketAddr::V6(std::net::SocketAddrV6::new(v6, port, 0, index))
+    } else if let Ok(ip) = host.trim_matches(|c| c == '[' || c == ']').parse::<IpAddr>() {
+        std::net::SocketAddr::new(ip, port)
+    } else {
+        // A name: let the resolver have it.
+        match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(socket_target(host, port).as_str())).await {
+            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Err(error)) => return Err(format!("connect: {error}")),
+            Err(_) => return Err("connect timed out".to_string()),
+        }
+    };
+    match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(target)).await {
+        Ok(Ok(stream)) => Ok(stream),
+        Ok(Err(error)) => Err(format!("connect: {error}")),
+        Err(_) => Err("connect timed out".to_string()),
     }
 }
 
@@ -185,16 +274,7 @@ async fn attempt(
 
     // A string host goes through getaddrinfo, so scoped IPv6 such as
     // fe80::1%en0 resolves correctly. IpAddr::parse would reject it.
-    let stream = match tokio::time::timeout(
-        Duration::from_secs(3),
-        tokio::net::TcpStream::connect(socket_target(host, port).as_str()),
-    )
-    .await
-    {
-        Ok(Ok(value)) => value,
-        Ok(Err(error)) => return Err(format!("connect: {error}")),
-        Err(_) => return Err("connect timed out".to_string()),
-    };
+    let stream = dial(host, port, Duration::from_secs(3)).await?;
     let _ = stream.set_nodelay(true);
 
     let socket = RpPairingSocket::new(stream);
@@ -245,12 +325,145 @@ async fn attempt(
         .create_tcp_listener()
         .await
         .map_err(|error| format!("listener: {error:?}"))?;
+    let key = client.encryption_key().to_vec();
+    finish_link(Box::new(client), host, tunnel_port, &key, stored).await
+}
 
-    let tunnel_stream = tokio::net::TcpStream::connect(socket_target(host, tunnel_port).as_str())
+/// The phone's `remoted` route, for iOS builds that no longer advertise
+/// `_remotepairing._tcp` at all (26.6.2 does not; it still advertises
+/// `_remoted._tcp`). Remote Service Discovery answers on a fixed port, lists
+/// the untrusted tunnel service, and that service speaks the same pairing
+/// protocol over RemoteXPC. It is how Xcode pairs over a cable, and it shows
+/// the plain Trust prompt on the phone rather than a code.
+async fn attempt_rsd(
+    session: &Arc<RpSession>,
+    host: &str,
+    existing: Option<Vec<u8>>,
+) -> Result<Link, String> {
+    const TUNNEL_SERVICE: &str = "com.apple.internal.dt.coredevice.untrusted.tunnelservice";
+    let rsd_port = {
+        let set = RSD_PORT.load(std::sync::atomic::Ordering::Relaxed);
+        if set == 0 { 58783 } else { set }
+    };
+
+    set_state(
+        session,
+        serde_json::json!({ "state": "connecting", "detail": format!("{host}:{rsd_port} (remoted)") }),
+    );
+
+    let rsd_stream = dial(host, rsd_port, Duration::from_secs(3))
         .await
-        .map_err(|error| format!("tunnel connect: {error}"))?;
+        .map_err(|e| format!("rsd {e}"))?;
 
-    let tunnel = connect_tls_psk_tunnel_native(tunnel_stream, client.encryption_key())
+    let outer = RsdHandshake::new(rsd_stream)
+        .await
+        .map_err(|error| format!("rsd handshake: {error:?}"))?;
+
+    let service_port = outer
+        .services
+        .get(TUNNEL_SERVICE)
+        .map(|service| service.port)
+        .ok_or_else(|| {
+            let mut names: Vec<&String> = outer.services.keys().collect();
+            names.sort();
+            format!(
+                "remoted does not list the tunnel service ({} services: {})",
+                names.len(),
+                names.iter().take(6).map(|n| n.as_str()).collect::<Vec<_>>().join(", ")
+            )
+        })?;
+
+    let service_stream = dial(host, service_port, Duration::from_secs(3))
+        .await
+        .map_err(|e| format!("tunnel service {e}"))?;
+    let _ = service_stream.set_nodelay(true);
+
+    let mut xpc = idevice::xpc::RemoteXpcClient::new(service_stream)
+        .await
+        .map_err(|error| format!("xpc: {error:?}"))?;
+    xpc.do_handshake()
+        .await
+        .map_err(|error| format!("xpc handshake: {error:?}"))?;
+
+    let socket = TolerantXpc { inner: xpc, session: session.clone() };
+    let mut client = RemotePairingClient::new(socket, "Cloak");
+    let mut pairing_file = match existing.and_then(|bytes| RpPairingFile::from_bytes(&bytes).ok()) {
+        Some(value) => value,
+        None => RpPairingFile::generate("Cloak"),
+    };
+
+    set_state(session, serde_json::json!({ "state": "pairing", "detail": format!("{host} (remoted)") }));
+
+    client
+        .attempt_pair_verify()
+        .await
+        .map_err(|error| format!("handshake: {error:?}"))?;
+
+    if let Err(validate_error) = client.validate_pairing(&mut pairing_file).await {
+        let pin_session = session.clone();
+        client
+            .pair(&mut pairing_file, || {
+                let inner = pin_session.clone();
+                async move {
+                    let (tx, rx) = oneshot::channel();
+                    *inner.pin.lock().unwrap() = Some(tx);
+                    set_state(&inner, serde_json::json!({ "state": "needs-pin" }));
+                    rx.await.unwrap_or_default()
+                }
+            })
+            .await
+            .map_err(|error| format!("validate: {validate_error:?} then setup: {error:?}"))?;
+    }
+
+    let stored = base64(&pairing_file.to_bytes());
+    set_state(
+        session,
+        serde_json::json!({ "state": "tunnelling", "pairing": stored, "detail": host }),
+    );
+
+    let tunnel_port = client
+        .create_tcp_listener()
+        .await
+        .map_err(|error| format!("listener: {error:?}"))?;
+    let key = client.encryption_key().to_vec();
+    finish_link(Box::new(client), host, tunnel_port, &key, stored).await
+}
+
+/// Brings the encrypted tunnel up over a freshly negotiated pairing and
+/// reads the service list inside it.
+async fn finish_link(
+    client: Box<dyn std::any::Any + Send>,
+    host: &str,
+    tunnel_port: u16,
+    key: &[u8],
+    stored: String,
+) -> Result<Link, String> {
+    // The phone answers with the port before the listener is always up, and
+    // on some builds it opens it on a different interface than the pairing
+    // came in on. So: the same host with patience, then every other address
+    // this phone has, then the reflector.
+    let mut tunnel_stream: Option<tokio::net::TcpStream> = None;
+    let mut last = String::new();
+    let mut hosts: Vec<String> = vec![host.to_string()];
+    for extra in TUNNEL_FALLBACK_HOSTS.lock().unwrap().iter() {
+        if !hosts.contains(extra) { hosts.push(extra.clone()); }
+    }
+    for candidate in &["10.7.0.1", "fd00:c10a:0:7::1"] {
+        if !hosts.iter().any(|h| h == candidate) { hosts.push(candidate.to_string()); }
+    }
+    'search: for (index, candidate) in hosts.iter().enumerate() {
+        let tries = if index == 0 { 12 } else { 3 };
+        for _ in 0..tries {
+            match dial(candidate, tunnel_port, Duration::from_secs(3)).await {
+                Ok(stream) => { tunnel_stream = Some(stream); break 'search; }
+                Err(e) => last = format!("{candidate}: {e}"),
+            }
+            tokio::time::sleep(Duration::from_millis(400)).await;
+        }
+    }
+    let tunnel_stream = tunnel_stream.ok_or_else(|| format!("tunnel port {tunnel_port} would not answer ({last})"))?;
+
+    let tunnel = connect_tls_psk_tunnel_native(tunnel_stream, key)
         .await
         .map_err(|error| format!("tls psk: {error:?}"))?;
 
@@ -297,6 +510,11 @@ async fn run(session: Arc<RpSession>, hosts: Vec<String>, port: u16, existing: O
     let mut notes: Vec<String> = Vec::new();
     let mut link: Option<Link> = None;
 
+    *TUNNEL_FALLBACK_HOSTS.lock().unwrap() = hosts
+        .iter()
+        .map(|entry| split_candidate(entry, port).0)
+        .collect();
+
     for entry in &hosts {
         let (host, host_port) = split_candidate(entry, port);
         match attempt(&session, &host, host_port, existing.clone()).await {
@@ -306,14 +524,22 @@ async fn run(session: Arc<RpSession>, hosts: Vec<String>, port: u16, existing: O
             }
             Err(error) => notes.push(format!("{host}:{host_port} {error}")),
         }
+        match attempt_rsd(&session, &host, existing.clone()).await {
+            Ok(value) => {
+                link = Some(value);
+                break;
+            }
+            Err(error) => notes.push(format!("{host} remoted: {error}")),
+        }
     }
 
     let Some(link) = link else {
+        let xpc = session.link.lock().unwrap().get("xpc").and_then(|v| v.as_str()).map(|t| format!(" XPC: {t}")).unwrap_or_default();
         set_state(
             &session,
             serde_json::json!({
                 "state": "error",
-                "reason": format!("no address answered as this phone. Tried: {}", notes.join(" | ")),
+                "reason": format!("no address answered as this phone. Tried: {}{xpc}", notes.join(" | ")),
             }),
         );
         return;
@@ -348,6 +574,11 @@ async fn run(session: Arc<RpSession>, hosts: Vec<String>, port: u16, existing: O
             Command::Stop => break,
 
             Command::Clear => continue,
+
+            Command::Install { app, reply } => {
+                let result = do_install(&mut handle, &mut handshake, &app).await;
+                let _ = reply.send(result);
+            }
 
             Command::Mount {
                 image,
@@ -460,6 +691,13 @@ async fn run(session: Arc<RpSession>, hosts: Vec<String>, port: u16, existing: O
                         Command::Mount { .. } => {
                             publish_ready(&session, &handshake, &stored, rsd_port, Some("stop simulating before mounting".to_string()));
                         }
+                        Command::Install { app, reply } => {
+                            let _ = location.clear().await;
+                            set_link(&session, serde_json::json!({ "simulating": false }));
+                            let result = do_install(&mut handle, &mut handshake, &app).await;
+                            let _ = reply.send(result);
+                            break;
+                        }
                     }
                 }
             }
@@ -551,6 +789,7 @@ fn publish_ready(
             "canMount": mounter,
             "rsdPort": rsd_port,
             "chipId": chip,
+            "udid": handshake.properties.get("UniqueDeviceID").and_then(|v| v.as_string()).map(str::to_owned),
             "simulating": link.get("simulating").and_then(|v| v.as_bool()).unwrap_or(false),
             "note": note,
             "services": names.iter().take(40).collect::<Vec<_>>(),
@@ -898,4 +1137,112 @@ fn read_optional_base64(value: *const c_char) -> Option<Vec<u8>> {
         .ok()
         .filter(|text| !text.is_empty())
         .and_then(unbase64)
+}
+
+
+/// RemoteXPC pairing transport that survives what iOS 26.6 sends first.
+///
+/// The library's own transport expects every message from the tunnel service
+/// to be a `RemotePairing.ControlChannelMessageEnvelope` with a `value`.
+/// 26.6.2 answers the first pairing request with something else (measured:
+/// "missing value field in RemoteXPC message"). This wrapper keeps reading
+/// until an envelope with a value arrives, accepts an envelope that arrives
+/// unwrapped, and writes whatever it skipped into the pairing status so the
+/// shape of the message is visible instead of lost.
+struct TolerantXpc {
+    inner: idevice::xpc::RemoteXpcClient<tokio::net::TcpStream>,
+    session: Arc<RpSession>,
+}
+
+impl std::fmt::Debug for TolerantXpc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TolerantXpc")
+    }
+}
+
+impl idevice::remote_pairing::RpPairingSocketProvider for TolerantXpc {
+    fn send_plain(
+        &mut self,
+        value: impl serde::Serialize,
+        seq: usize,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), idevice::IdeviceError>> + Send + '_>> {
+        idevice::remote_pairing::RpPairingSocketProvider::send_plain(&mut self.inner, value, seq)
+    }
+
+    fn send_encrypted(
+        &mut self,
+        ciphertext: Vec<u8>,
+        seq: usize,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), idevice::IdeviceError>> + Send + '_>> {
+        idevice::remote_pairing::RpPairingSocketProvider::send_encrypted(&mut self.inner, ciphertext, seq)
+    }
+
+    fn recv_plain<'a>(
+        &'a mut self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<plist::Value, idevice::IdeviceError>> + Send + 'a>> {
+        Box::pin(async move {
+            for attempt in 0..8 {
+                // The library reads replies on the root channel. If what
+                // arrives there is not a pairing envelope, look on the reply
+                // channel too: a server answering a wanting-reply request
+                // puts the answer there.
+                let root = if attempt % 2 == 0 {
+                    self.inner.recv_root().await?
+                } else {
+                    match tokio::time::timeout(Duration::from_secs(3), self.inner.recv()).await {
+                        Ok(Ok(v)) => v,
+                        Ok(Err(e)) => return Err(e),
+                        Err(_) => continue,
+                    }
+                };
+                let mut dict = match root.clone().into_dictionary() {
+                    Some(d) => d,
+                    None => {
+                        note_raw(&self.session, "non-dictionary", &root);
+                        continue;
+                    }
+                };
+                // The normal shape.
+                let value = match dict.remove("value") {
+                    Some(v) => v,
+                    None if dict.contains_key("message") => plist::Value::Dictionary(dict.clone()),
+                    None => {
+                        note_raw(&self.session, "no value field", &root);
+                        continue;
+                    }
+                };
+                if let Some(plain) = value
+                    .as_dictionary()
+                    .and_then(|x| x.get("message"))
+                    .and_then(|x| x.as_dictionary())
+                    .and_then(|x| x.get("plain"))
+                    .and_then(|x| x.as_dictionary())
+                    .and_then(|x| x.get("_0"))
+                    .cloned()
+                {
+                    return Ok(plain);
+                }
+                return Ok(value);
+            }
+            Err(idevice::IdeviceError::UnexpectedResponse(
+                "the tunnel service never sent a pairing envelope".into(),
+            ))
+        })
+    }
+
+    fn serialize_bytes(b: &[u8]) -> plist::Value {
+        plist::Value::Data(b.to_owned())
+    }
+
+    fn deserialize_bytes(v: plist::Value) -> Option<Vec<u8>> {
+        if let plist::Value::Data(v) = v { Some(v) } else { None }
+    }
+}
+
+fn note_raw(session: &RpSession, why: &str, value: &plist::Value) {
+    let text = format!("{value:?}");
+    let text = if text.len() > 600 { format!("{}…", &text[..600]) } else { text };
+    let mut link = session.link.lock().unwrap();
+    let previous = link.get("xpc").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    link["xpc"] = serde_json::Value::String(format!("{previous}[{why}: {text}] "));
 }

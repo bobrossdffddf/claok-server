@@ -136,7 +136,17 @@ public actor OverpassClient {
                 default: kind = nil
                 }
                 if let kind {
-                    controls.append(TrafficControl(kind: kind, coordinate: coordinate, alongTrack: 0))
+                    let minorOnly = tags["stop"] == "minor" || tags["direction"] != nil
+                    let signalled = tags["crossing"] == "traffic_signals"
+                        || tags["crossing_ref"] == "pelican"
+                        || tags["crossing_ref"] == "toucan"
+                    controls.append(TrafficControl(
+                        kind: kind,
+                        coordinate: coordinate,
+                        alongTrack: 0,
+                        appliesToMinorRoadOnly: minorOnly,
+                        isSignalled: signalled
+                    ))
                 }
             }
         }

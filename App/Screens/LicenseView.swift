@@ -23,7 +23,7 @@ struct LicenseView: View {
                     ZStack {
                         Circle().fill(Palette.accent.opacity(0.13)).frame(width: 72, height: 72)
                         Image(systemName: "key.fill")
-                            .font(.system(size: 28, weight: .semibold))
+                            .font(.system(.title, weight: .semibold))
                             .foregroundStyle(Palette.accent)
                     }
 
@@ -42,6 +42,13 @@ struct LicenseView: View {
                         TextField("CLOAK-", text: $key)
                             .textInputAutocapitalization(.characters)
                             .autocorrectionDisabled()
+                            .keyboardType(.asciiCapable)
+                            .textContentType(.oneTimeCode)
+                            .submitLabel(.go)
+                            .onSubmit {
+                                guard key.count >= 8, !licensing.isWorking else { return }
+                                Task { await licensing.activate(key: key) }
+                            }
                             .font(.readout(17))
                             .foregroundStyle(.white)
                             .focused($focused)
@@ -89,7 +96,7 @@ struct LicenseView: View {
     private func note(_ title: String, _ detail: String) -> some View {
         HStack(alignment: .top, spacing: Metrics.snug) {
             Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 14))
+                .font(.system(.footnote))
                 .foregroundStyle(Palette.accent)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(.label(13, weight: .semibold)).foregroundStyle(.white)
@@ -113,7 +120,7 @@ struct LicenseRefusedView: View {
             Palette.ground.ignoresSafeArea()
             VStack(spacing: Metrics.regular) {
                 Image(systemName: "lock.circle.fill")
-                    .font(.system(size: 44))
+                    .font(.system(.largeTitle))
                     .foregroundStyle(Palette.warn)
                 Text("Cloak is locked")
                     .font(.label(24, weight: .bold))

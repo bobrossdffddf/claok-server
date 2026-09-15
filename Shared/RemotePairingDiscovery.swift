@@ -69,14 +69,169 @@ public enum RemotePairingDiscovery {
         if let found = await browse(for: halfway) {
             return found
         }
-        if lastObstacle == .localNetworkDenied {
-            // A second browser will be refused exactly like the first one was.
-            return offlineEndpoint()
-        }
-        if let found = await browse(for: halfway) {
+        // A second browser is refused exactly like the first when permission
+        // is the problem, so skip straight to the routes that need none.
+        if lastObstacle != .localNetworkDenied, let found = await browse(for: halfway) {
             return found
         }
-        return offlineEndpoint()
+        if let cached = offlineEndpoint() {
+            return cached
+        }
+        // Bonjour has failed twice and nothing is remembered. The service is
+        // still there, on this very phone, listening on some port in the
+        // ephemeral range iOS hands out. So knock on the doors through the
+        // reflector until one answers, rather than telling the person to go
+        // and look at a Settings switch that may not be the problem.
+        if let port = await scanForPairingPort() {
+            AppGroup.defaults.set(Int(port), forKey: portKey)
+            lastObstacle = nil
+            return Endpoint(
+                hosts: [
+                    "\(LocalAddresses.reflector)|\(port)",
+                    "\(LocalAddresses.reflector6)|\(port)"
+                ],
+                port: port
+            )
+        }
+        // Still nothing. The bridge has one more route that needs no
+        // advertisement at all: the phone's remoted service on its fixed
+        // port. Hand it the reflector so it can try; the classic port is
+        // only a placeholder here.
+        return Endpoint(
+            hosts: ["\(LocalAddresses.reflector)|49152"],
+            port: 49152
+        )
+    }
+
+    /// Finds the pairing service by trying ports on the reflector address.
+    ///
+    /// iOS puts `remotepairingd` on a port from the ephemeral range, 49152
+    /// upwards, and the loopback reflector delivers a connection to it
+    /// without any discovery. A plain TCP accept is not proof on its own, so
+    /// each open port is asked to start the RPPairing handshake: the real
+    /// service answers the magic, anything else does not.
+    /// The port `_remoted._tcp` (Remote Service Discovery) is advertised on.
+    /// On the cable it is always 58783; on Wi-Fi iOS picks one, and 26.6.2
+    /// only offers pairing through this service, so the port has to be read
+    /// off the advertisement. Remembered so the next start needs no browse.
+    private static let remotedPortKey = "remotedPort"
+
+    public static var cachedRemotedPort: UInt16? {
+        let value = AppGroup.defaults.integer(forKey: remotedPortKey)
+        return value > 0 ? UInt16(value) : nil
+    }
+
+    public static func findRemotedPort(timeout: TimeInterval = 8) async -> UInt16? {
+        let browser = NWBrowser(for: .bonjour(type: "_remoted._tcp", domain: nil), using: .tcp)
+        let box = FoundEndpoints()
+        browser.browseResultsChangedHandler = { results, _ in
+            for result in results { Task { await box.add(result.endpoint) } }
+        }
+        browser.start(queue: .global())
+        let deadline = Date().addingTimeInterval(timeout)
+        var endpoints: [NWEndpoint] = []
+        while endpoints.isEmpty && Date() < deadline {
+            endpoints = await box.values
+            if endpoints.isEmpty { try? await Task.sleep(for: .milliseconds(200)) }
+        }
+        browser.cancel()
+        for endpoint in endpoints {
+            if let resolved = await resolve(endpoint, timeout: 4) {
+                AppGroup.defaults.set(Int(resolved.port), forKey: remotedPortKey)
+                lastRemotedHosts = resolved.hosts
+                return resolved.port
+            }
+        }
+        return cachedRemotedPort
+    }
+
+    /// The addresses `_remoted._tcp` resolved to, so they can be dialled
+    /// directly as well as through the reflector.
+    nonisolated(unsafe) public private(set) static var lastRemotedHosts: [String] = []
+
+    /// Extra candidates for the bridge: the remoted addresses, each tagged
+    /// with the remoted port.
+    public static func remotedCandidates(port: UInt16) -> [String] {
+        lastRemotedHosts.map { "\($0)|\(port)" }
+    }
+
+    /// What the last scan saw, for the failure card.
+    nonisolated(unsafe) public private(set) static var lastScanReport: String?
+
+    public static func scanForPairingPort(range: ClosedRange<UInt16> = 49152...49450) async -> UInt16? {
+        lastScanReport = nil
+        let ports = Array(range).filter { $0 != 62078 }
+        let batch = 24
+        var index = 0
+        var openPorts: [UInt16] = []
+        while index < ports.count {
+            let slice = ports[index..<min(index + batch, ports.count)]
+            index += batch
+            let hits = await withTaskGroup(of: (UInt16, PortAnswer).self) { group -> [(UInt16, PortAnswer)] in
+                for port in slice {
+                    group.addTask { (port, await answersPairing(host: LocalAddresses.reflector, port: port)) }
+                }
+                var found: [(UInt16, PortAnswer)] = []
+                for await result in group where result.1 != .closed { found.append(result) }
+                return found.sorted { $0.0 < $1.0 }
+            }
+            if let talks = hits.first(where: { $0.1 == .talks }) {
+                lastScanReport = "port \(talks.0) on \(LocalAddresses.reflector) answered the pairing handshake"
+                return talks.0
+            }
+            openPorts.append(contentsOf: hits.map(\.0))
+        }
+        // Nothing spoke the handshake, but something is listening. The bridge
+        // will find out for certain; a wrong guess costs one failed attempt.
+        lastScanReport = openPorts.isEmpty
+            ? "scanned \(LocalAddresses.reflector) ports \(range.lowerBound)-\(range.upperBound): nothing listening (tunnel up: \(Reflector.isUp))"
+            : "scanned \(LocalAddresses.reflector) ports \(range.lowerBound)-\(range.upperBound): open but silent: \(openPorts.map(String.init).joined(separator: ", "))"
+        return openPorts.first
+    }
+
+    private enum PortAnswer: Equatable { case closed, open, talks }
+
+    /// True when the port accepts a connection and replies to the RPPairing
+    /// handshake magic within a moment.
+    private static func answersPairing(host: String, port: UInt16, timeout: TimeInterval = 0.9) async -> PortAnswer {
+        await withCheckedContinuation { continuation in
+            let resumed = ResumeOnce()
+            let connection = NWConnection(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!, using: .tcp)
+            let finish: @Sendable (PortAnswer) -> Void = { answer in
+                Task {
+                    guard await resumed.claim() else { return }
+                    connection.cancel()
+                    continuation.resume(returning: answer)
+                }
+            }
+            let opened = OpenFlag()
+            connection.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    Task { await opened.set() }
+                    // RPPairing wire header: magic, version, then a length.
+                    var hello = Data("RPPairing".utf8)
+                    hello.append(19)
+                    hello.append(contentsOf: [0, 0, 0, 0, 0, 0, 0, 0])
+                    connection.send(content: hello, completion: .contentProcessed { _ in
+                        connection.receive(minimumIncompleteLength: 1, maximumLength: 64) { data, _, _, _ in
+                            finish((data?.count ?? 0) > 0 ? .talks : .open)
+                        }
+                    })
+                case .failed, .cancelled:
+                    Task { finish(await opened.value ? .open : .closed) }
+                case .waiting:
+                    finish(.closed)
+                default:
+                    break
+                }
+            }
+            connection.start(queue: .global())
+            Task {
+                try? await Task.sleep(for: .seconds(timeout))
+                finish(await opened.value ? .open : .closed)
+            }
+        }
     }
 
     private static func browse(for timeout: TimeInterval) async -> Endpoint? {
@@ -395,4 +550,19 @@ private actor FoundEndpoints {
 private actor ResolvedEndpoint {
     private(set) var value: RemotePairingDiscovery.Resolution?
     func set(_ value: RemotePairingDiscovery.Resolution) { if self.value == nil { self.value = value } }
+}
+
+
+private actor ResumeOnce {
+    private var done = false
+    func claim() -> Bool {
+        if done { return false }
+        done = true
+        return true
+    }
+}
+
+private actor OpenFlag {
+    private(set) var value = false
+    func set() { value = true }
 }
