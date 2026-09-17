@@ -17,6 +17,7 @@ final class LicenseController {
         case unlocked
         case needsKey
         case refused(String)
+        case trial
     }
 
     private(set) var state: State = .checking
@@ -28,6 +29,18 @@ final class LicenseController {
     private let client = LicenseClient()
 
     var isUnlocked: Bool { state == .unlocked }
+
+    var canUseApp: Bool { state == .unlocked || state == .trial }
+
+    func startTrial() async {
+        TrialController.shared.isChosen = true
+        state = .trial
+        await TrialController.shared.refresh()
+    }
+
+    func leaveTrial() {
+        state = .needsKey
+    }
 
     /// Builds with no licensing configured run unlocked, which is what
     /// development and anyone building this themselves wants.
@@ -41,7 +54,12 @@ final class LicenseController {
         }
 
         guard let saved = LicenseStore.savedToken, let key = LicenseStore.savedKey else {
-            state = .needsKey
+            if TrialController.shared.isChosen {
+                state = .trial
+                await TrialController.shared.refresh()
+            } else {
+                state = .needsKey
+            }
             await checkForUpdate()
             return
         }
@@ -75,6 +93,7 @@ final class LicenseController {
             LicenseStore.save(fresh, key: trimmed)
             token = fresh
             state = .unlocked
+            TrialController.shared.showsPaywall = false
         } catch {
             problem = error.localizedDescription
         }

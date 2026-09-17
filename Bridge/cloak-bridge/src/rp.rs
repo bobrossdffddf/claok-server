@@ -237,9 +237,162 @@ async fn dial(host: &str, port: u16, timeout: Duration) -> Result<tokio::net::Tc
     };
     match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(target)).await {
         Ok(Ok(stream)) => Ok(stream),
-        Ok(Err(error)) => Err(format!("connect: {error}")),
+        Ok(Err(error)) => {
+            // "Cannot assign requested address" here is not the destination
+            // being unreachable. A plain connect asks the kernel for the
+            // wildcard address first, and this process is refused an IPv4
+            // wildcard: measured on the device as bind-any4=fail(49) while
+            // bind-any6 succeeds and the routing table answers happily.
+            //
+            // So do not ask for the wildcard. Ask the routing table which
+            // local address it would use for this destination, then bind that
+            // exact address. A UDP connect performs the lookup and sends
+            // nothing, which is how the source is discovered without traffic.
+            let code = error.raw_os_error();
+            let worth_retrying = code == Some(libc::EADDRNOTAVAIL) || code == Some(libc::ECONNREFUSED);
+            if worth_retrying {
+                match tokio::time::timeout(timeout, connect_from_any_source(target)).await {
+                    Ok(Ok(stream)) => return Ok(stream),
+                    Ok(Err(second)) => {
+                        return Err(format!("connect: {error} (and from named sources: {second})"))
+                    }
+                    Err(_) => return Err("connect timed out".to_string()),
+                }
+            }
+            Err(format!("connect: {error}"))
+        }
         Err(_) => Err("connect timed out".to_string()),
     }
+}
+
+/// The local address the routing table would choose to reach this target.
+///
+/// `connect` on a UDP socket is a route lookup and nothing more: no packet
+/// leaves the phone, but the socket is then bound to whatever source the
+/// kernel picked, which `local_addr` reports.
+fn routed_source(target: std::net::SocketAddr) -> Option<std::net::IpAddr> {
+    let any: std::net::SocketAddr = if target.is_ipv4() {
+        "0.0.0.0:0".parse().ok()?
+    } else {
+        "[::]:0".parse().ok()?
+    };
+    let probe = std::net::UdpSocket::bind(any).ok()?;
+    probe.connect(target).ok()?;
+    probe.local_addr().ok().map(|addr| addr.ip())
+}
+
+/// Connects with the source address named explicitly, trying each one that
+/// could plausibly work.
+///
+/// Which source is used is not a detail through the reflector, it is the whole
+/// thing. LocalDevVPN swaps source and destination on every packet, so a
+/// connection sent from `A` to the reflector arrives back **at `A`**, from the
+/// reflector's address. It therefore only reaches the pairing service if the
+/// service is listening on `A`.
+///
+/// iOS binds that service to its real local-network interfaces, never to the
+/// tunnel's own address. So the routed source, which is the tunnel address,
+/// delivers the packet somewhere nothing is listening and the connection is
+/// refused. Binding a real interface address instead lands it where the
+/// service actually is, arriving from the reflector so it looks remote rather
+/// than like the phone talking to itself.
+async fn connect_from_any_source(
+    target: std::net::SocketAddr,
+) -> Result<tokio::net::TcpStream, String> {
+    let mut sources: Vec<std::net::IpAddr> = Vec::new();
+
+    // What the routing table would pick. Right for an ordinary destination.
+    if let Some(source) = routed_source(target) {
+        sources.push(source);
+    }
+    // Then every real interface address, which is where the service listens.
+    for source in real_sources(target.is_ipv4()) {
+        if !sources.contains(&source) {
+            sources.push(source);
+        }
+    }
+
+    let mut last = "no local address to try".to_string();
+    for source in sources {
+        let socket = match target {
+            std::net::SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4(),
+            std::net::SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6(),
+        };
+        let Ok(socket) = socket else { continue };
+        if let Err(error) = socket.bind(std::net::SocketAddr::new(source, 0)) {
+            last = format!("bind {source}: {error}");
+            continue;
+        }
+        match socket.connect(target).await {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last = format!("via {source}: {error}"),
+        }
+    }
+    Err(last)
+}
+
+/// Every address on a real local-network interface, which is the only kind iOS
+/// offers its pairing service on. Tunnels and loopback are excluded on purpose:
+/// the tunnel address is exactly the one that does not work, and loopback
+/// cannot be reflected.
+fn real_sources(want_v4: bool) -> Vec<std::net::IpAddr> {
+    let mut found = Vec::new();
+    let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
+    if unsafe { libc::getifaddrs(&mut head) } != 0 {
+        return found;
+    }
+
+    let mut entry = head;
+    while !entry.is_null() {
+        let item = unsafe { &*entry };
+        entry = item.ifa_next;
+
+        if item.ifa_addr.is_null() {
+            continue;
+        }
+        let flags = item.ifa_flags as libc::c_int;
+        if flags & libc::IFF_UP == 0 || flags & libc::IFF_LOOPBACK != 0 {
+            continue;
+        }
+
+        let name = unsafe { std::ffi::CStr::from_ptr(item.ifa_name) }
+            .to_string_lossy()
+            .into_owned();
+        // Wi-Fi and wired only. `en2` carrying a self-assigned 169.254 address
+        // counts: with the radio on but nothing joined it is still a local
+        // network interface, and the service binds to it.
+        if !(name.starts_with("en") || name.starts_with("bridge")) {
+            continue;
+        }
+
+        let family = unsafe { (*item.ifa_addr).sa_family } as libc::c_int;
+        match (family, want_v4) {
+            (libc::AF_INET, true) => {
+                let sa = unsafe { &*(item.ifa_addr as *const libc::sockaddr_in) };
+                let ip = std::net::Ipv4Addr::from(u32::from_be(sa.sin_addr.s_addr));
+                let ip = std::net::IpAddr::V4(ip);
+                if !found.contains(&ip) {
+                    found.push(ip);
+                }
+            }
+            (libc::AF_INET6, false) => {
+                let sa = unsafe { &*(item.ifa_addr as *const libc::sockaddr_in6) };
+                let ip = std::net::Ipv6Addr::from(sa.sin6_addr.s6_addr);
+                // A scoped link-local cannot be bound without its scope, and
+                // the scope is not carried here, so leave those alone.
+                if ip.segments()[0] & 0xffc0 != 0xfe80 {
+                    let ip = std::net::IpAddr::V6(ip);
+                    if !found.contains(&ip) {
+                        found.push(ip);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    unsafe { libc::freeifaddrs(head) };
+    found
 }
 
 fn split_candidate(entry: &str, fallback: u16) -> (String, u16) {
@@ -442,7 +595,7 @@ async fn finish_link(
     // on some builds it opens it on a different interface than the pairing
     // came in on. So: the same host with patience, then every other address
     // this phone has, then the reflector.
-    let mut tunnel_stream: Option<tokio::net::TcpStream> = None;
+    let mut established = None;
     let mut last = String::new();
     let mut hosts: Vec<String> = vec![host.to_string()];
     for extra in TUNNEL_FALLBACK_HOSTS.lock().unwrap().iter() {
@@ -451,21 +604,42 @@ async fn finish_link(
     for candidate in &["10.7.0.1", "fd00:c10a:0:7::1"] {
         if !hosts.iter().any(|h| h == candidate) { hosts.push(candidate.to_string()); }
     }
+
+    // Both halves have to succeed on the same address before this settles.
+    //
+    // It used to take the first address whose TCP connect worked and then run
+    // the TLS handshake exactly once, outside the loop. That is wrong: a
+    // connect proving something is listening does not prove it is the tunnel.
+    // On this phone one interface accepts the socket and then closes the
+    // encrypted session, and every remaining address went untried because the
+    // loop had already stopped.
     'search: for (index, candidate) in hosts.iter().enumerate() {
         let tries = if index == 0 { 12 } else { 3 };
         for _ in 0..tries {
             match dial(candidate, tunnel_port, Duration::from_secs(3)).await {
-                Ok(stream) => { tunnel_stream = Some(stream); break 'search; }
+                Ok(stream) => {
+                    match connect_tls_psk_tunnel_native(stream, key).await {
+                        Ok(tunnel) => {
+                            established = Some(tunnel);
+                            break 'search;
+                        }
+                        Err(error) => {
+                            // It answered but would not carry a tunnel. Another
+                            // go at the same address will be refused the same
+                            // way, so move on to the next one.
+                            last = format!("{candidate}: tls psk: {error:?}");
+                            continue 'search;
+                        }
+                    }
+                }
                 Err(e) => last = format!("{candidate}: {e}"),
             }
             tokio::time::sleep(Duration::from_millis(400)).await;
         }
     }
-    let tunnel_stream = tunnel_stream.ok_or_else(|| format!("tunnel port {tunnel_port} would not answer ({last})"))?;
 
-    let tunnel = connect_tls_psk_tunnel_native(tunnel_stream, key)
-        .await
-        .map_err(|error| format!("tls psk: {error:?}"))?;
+    let tunnel = established
+        .ok_or_else(|| format!("no address carried the tunnel on port {tunnel_port} ({last})"))?;
 
     let rsd_port = tunnel.info.server_rsd_port;
     let mtu = tunnel.info.mtu as usize;
@@ -539,7 +713,11 @@ async fn run(session: Arc<RpSession>, hosts: Vec<String>, port: u16, existing: O
             &session,
             serde_json::json!({
                 "state": "error",
-                "reason": format!("no address answered as this phone. Tried: {}{xpc}", notes.join(" | ")),
+                "reason": format!(
+                    "no address answered as this phone. Tried: {}{xpc}\n\n{}",
+                    notes.join(" | "),
+                    ipv4_health()
+                ),
             }),
         );
         return;
@@ -554,7 +732,7 @@ async fn run(session: Arc<RpSession>, hosts: Vec<String>, port: u16, existing: O
         host,
     } = link;
 
-    set_link(&session, serde_json::json!({ "simulating": false, "host": host }));
+    set_link(&session, serde_json::json!({ "simulating": false, "host": host.clone() }));
 
     let mut handshake = handshake;
 
@@ -784,6 +962,10 @@ fn publish_ready(
         serde_json::json!({
             "state": "ready",
             "pairing": stored,
+            // Which address carried it. Next run starts here instead of
+            // walking the whole ladder again. Read back from the session,
+            // which `set_link` filled in when the link came up.
+            "host": link.get("host").and_then(|v| v.as_str()).unwrap_or_default(),
             "serviceCount": names.len(),
             "hasDvt": dvt,
             "canMount": mounter,
@@ -1005,12 +1187,27 @@ async fn host_run(
     existing: Option<Vec<u8>>,
     existing_irk: Option<Vec<u8>>,
 ) {
-    let listener = match tokio::net::TcpListener::bind(("0.0.0.0", 0)).await {
+    // IPv6 first, and this is not a style choice.
+    //
+    // Measured on the device: this app can be denied IPv4 entirely while IPv6
+    // works perfectly in the same instant. Binding the IPv4 wildcard on port 0
+    // cannot fail on a healthy phone, and when it does fail with
+    // EADDRNOTAVAIL it is because the OS is withholding IPv4 from the process.
+    // The IPv6 wildcard accepts IPv4 connections too wherever IPv4 is working,
+    // so asking for it first costs nothing and is the difference between
+    // pairing and a dead end.
+    let listener = match tokio::net::TcpListener::bind(("::", 0)).await {
         Ok(value) => value,
-        Err(error) => {
-            set_state(&session, serde_json::json!({ "state": "error", "reason": format!("listen {error}") }));
-            return;
-        }
+        Err(v6) => match tokio::net::TcpListener::bind(("0.0.0.0", 0)).await {
+            Ok(value) => value,
+            Err(v4) => {
+                set_state(&session, serde_json::json!({
+                    "state": "error",
+                    "reason": format!("listen: ipv6 {v6}, ipv4 {v4}"),
+                }));
+                return;
+            }
+        },
     };
 
     let port = match listener.local_addr() {
@@ -1245,4 +1442,54 @@ fn note_raw(session: &RpSession, why: &str, value: &plist::Value) {
     let mut link = session.link.lock().unwrap();
     let previous = link.get("xpc").and_then(|v| v.as_str()).unwrap_or("").to_string();
     link["xpc"] = serde_json::Value::String(format!("{previous}[{why}: {text}] "));
+}
+
+
+/// Whether this app can use IPv4 at all right now.
+///
+/// Diagnostic only, and it changes nothing. It exists because every IPv4
+/// address in the failure list above fails with the same errno, including this
+/// phone's own, which is not a routing problem but the OS refusing the process
+/// IPv4 outright. Binding the wildcard cannot fail on a healthy phone, and a
+/// UDP connect is a route lookup that sends no packet, so between them these
+/// separate "no route to the reflector" from "no IPv4 for this app" without
+/// anybody having to test anything by hand.
+fn ipv4_health() -> String {
+    use std::net::{SocketAddr, TcpListener, UdpSocket};
+
+    fn code(error: &std::io::Error) -> String {
+        error.raw_os_error().map(|c| c.to_string()).unwrap_or_else(|| error.to_string())
+    }
+
+    let any4: SocketAddr = "0.0.0.0:0".parse().expect("literal");
+    let any6: SocketAddr = "[::]:0".parse().expect("literal");
+
+    let tcp4 = match TcpListener::bind(any4) {
+        Ok(_) => "ok".to_string(),
+        Err(e) => format!("fail({})", code(&e)),
+    };
+    let tcp6 = match TcpListener::bind(any6) {
+        Ok(_) => "ok".to_string(),
+        Err(e) => format!("fail({})", code(&e)),
+    };
+
+    let route = |target: &str| -> String {
+        let Ok(address) = target.parse::<SocketAddr>() else { return "bad".into() };
+        match UdpSocket::bind(any4) {
+            Ok(socket) => match socket.connect(address) {
+                Ok(()) => socket
+                    .local_addr()
+                    .map(|local| format!("via {}", local.ip()))
+                    .unwrap_or_else(|_| "ok".into()),
+                Err(e) => format!("fail({})", code(&e)),
+            },
+            Err(e) => format!("nosocket({})", code(&e)),
+        }
+    };
+
+    format!(
+        "IPv4 check: bind-any4={tcp4} bind-any6={tcp6} route-reflector={} route-internet={}",
+        route("10.7.0.1:9"),
+        route("1.1.1.1:9"),
+    )
 }

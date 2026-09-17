@@ -110,6 +110,12 @@ pub fn remember_rejected(url: &str) {
 }
 
 /// Every healthy helper, in order, so a run can work down the list.
+///
+/// Probed in waves rather than one at a time. These are a dozen independent
+/// servers and asking them in turn meant a single slow one held up the whole
+/// sign-in; run together, the wave costs what its slowest member costs. The
+/// order of the answers is still the order of the list, because the preference
+/// built into that order is the point of having one.
 pub async fn healthy_candidates(config: &Config) -> Vec<String> {
     let Ok(client) = reqwest::Client::builder()
         .user_agent("Cloak Installer")
@@ -123,14 +129,37 @@ pub async fn healthy_candidates(config: &Config) -> Vec<String> {
         merge_published(&mut list, &client).await;
     }
 
-    let mut answering = Vec::new();
-    for url in list {
-        if healthy(&url, &client).await {
-            answering.push(url);
+    let mut answering: Vec<String> = Vec::new();
+    for wave in list.chunks(WAVE) {
+        let probes: Vec<_> = wave
+            .iter()
+            .map(|url| {
+                let client = client.clone();
+                let url = url.clone();
+                tokio::spawn(async move { healthy(&url, &client).await.then_some(url) })
+            })
+            .collect();
+        for probe in probes {
+            if let Ok(Some(url)) = probe.await {
+                answering.push(url);
+            }
+        }
+
+        // Enough to work down if the first one disappoints, which is all the
+        // rest of the list is ever used for. Probing the remainder buys
+        // nothing and costs everybody's time.
+        if answering.len() >= ENOUGH {
+            break;
         }
     }
     answering
 }
+
+/// How many helpers are probed at once.
+const WAVE: usize = 6;
+
+/// How many working helpers is enough to stop looking.
+const ENOUGH: usize = 3;
 
 /// Whether a server is answering with data Apple might accept.
 ///
@@ -148,7 +177,7 @@ pub async fn healthy(url: &str, client: &reqwest::Client) -> bool {
         .post(format!("{url}/v3/get_headers"))
         .header("Content-Type", "application/json")
         .body(r#"{"identifier":"AAAAAAAAAAAAAAAAAAAAAA=="}"#)
-        .timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(5))
         .send()
         .await;
 
@@ -158,7 +187,10 @@ pub async fn healthy(url: &str, client: &reqwest::Client) -> bool {
             tracing::info!("anisette {url}: headers endpoint answered HTTP {}", response.status());
         }
         Err(error) => {
+            // Nothing answered at all, so there is no older dialect to fall
+            // back to and asking twice only doubles the wait.
             tracing::info!("anisette {url}: headers endpoint {error}");
+            return false;
         }
     }
 
@@ -166,7 +198,7 @@ pub async fn healthy(url: &str, client: &reqwest::Client) -> bool {
     // original check rather than being dropped for speaking an older dialect.
     let response = match client
         .get(format!("{url}/"))
-        .timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(5))
         .send()
         .await
     {
@@ -205,11 +237,45 @@ pub fn helper_broke(text: &str, url: &str) -> bool {
         return true;
     }
     let lower = text.to_lowercase();
+    // A failure against Apple's own host is not this helper falling over.
+    if lower.contains("gsa.apple.com") || lower.contains("gsservice2") {
+        return false;
+    }
     lower.contains("/v3/get_headers")
         || lower.contains("/v3/client_info")
         || lower.contains("provisioning timed out")
         || lower.contains("timed out")
         || lower.contains("timeout")
+}
+
+/// Whether the identity the helper minted is one Apple will not verify.
+///
+/// Apple answers -22421 at the password step, worded as if something went
+/// wrong at random. It did not. The one-time code that goes up with the
+/// password is computed from a blob provisioned inside one particular helper,
+/// and that helper keeps the other half of it. A blob from a different helper,
+/// or one that server has since forgotten, produces a code that verifies
+/// against nothing, and this is what Apple says about that.
+///
+/// It is not the password, and Apple has not judged the account: the proof
+/// never got as far as being checked. Provisioning again is the whole fix.
+pub fn stale_session(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("-22421")
+        || lower.contains("session expired")
+        || lower.contains("this action could not be completed")
+}
+
+/// What to say when provisioning again did not help either.
+pub fn stale_session_message() -> String {
+    "Apple would not verify this computer's identity.\n\nThe password was never judged, so \
+     nothing has happened to the Apple ID. What Apple turned down is the one-time code that \
+     goes up alongside it, which is produced by the sign-in helper rather than by Cloak.\n\n\
+     Cloak threw that identity away and provisioned a fresh one against different helpers, \
+     and Apple refused those too, so the helpers are having a bad day rather than anything \
+     being wrong at your end.\n\nWait ten minutes and try once. If it keeps happening, put \
+     a working helper address in the box under \"Sign-in helper\" on the previous screen."
+        .to_string()
 }
 
 /// Whether Apple is throttling the identity rather than judging the account.
@@ -275,28 +341,17 @@ pub async fn merge_published(list: &mut Vec<String>, client: &reqwest::Client) {
 /// Returns the list it tried alongside, so a total failure can say what was
 /// attempted rather than just that something went wrong.
 pub async fn pick(config: &Config) -> Result<String, Vec<String>> {
-    let client = match reqwest::Client::builder()
-        .user_agent("Cloak Installer")
-        .build()
-    {
-        Ok(client) => client,
-        Err(_) => return Err(candidates(config)),
-    };
-
-    let mut list = candidates(config);
-    if config.anisette_url.is_none() {
-        merge_published(&mut list, &client).await;
-    }
-
-    for url in &list {
-        if healthy(url, &client).await {
+    match healthy_candidates(config).await.into_iter().next() {
+        Some(url) => {
             tracing::info!("using anisette server {url}");
-            return Ok(url.clone());
+            Ok(url)
+        }
+        None => {
+            let tried = candidates(config);
+            tracing::warn!("no anisette server answered out of {}", tried.len());
+            Err(tried)
         }
     }
-
-    tracing::warn!("no anisette server answered out of {}", list.len());
-    Err(list)
 }
 
 /// Whether Apple refused to provision against this helper.
@@ -314,6 +369,12 @@ pub fn helper_was_rejected(text: &str) -> bool {
     // calling it a refusal both blames the wrong party and burns one of the
     // attempts that are supposed to be reserved for answers from Apple.
     if lower.contains("timed out") || lower.contains("timeout") {
+        return false;
+    }
+
+    // An unverifiable one-time code is its own thing and has its own cure.
+    // Calling it a refusal would blacklist a helper that is working fine.
+    if stale_session(text) {
         return false;
     }
 

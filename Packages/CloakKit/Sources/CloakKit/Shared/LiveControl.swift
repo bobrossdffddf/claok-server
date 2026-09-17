@@ -44,31 +44,54 @@ public enum LiveControl {
 
     public static let unavailable = "Cloak is not running, so there is nothing to control. Open it and try again."
 
+    /// How long a button press waits for the app to finish waking up.
+    private static let wakeGrace: Duration = .seconds(2)
+    private static let wakePoll: Duration = .milliseconds(50)
+
+    /// Handlers, waiting a moment for them if the app is still starting.
+    ///
+    /// A `LiveActivityIntent` gets its process launched in the background if
+    /// Cloak is not already up, and the press can land in the gap before the
+    /// app has built its model and registered. Without this the stop button on
+    /// the lock screen reports failure for something that was about to work.
+    /// Inside the widget extension nothing ever registers, so this costs the
+    /// grace period once and then says so honestly.
+    private static func ready() async -> Handlers? {
+        if let handlers { return handlers }
+        var waited: Duration = .zero
+        while waited < wakeGrace {
+            try? await Task.sleep(for: wakePoll)
+            if let handlers { return handlers }
+            waited += wakePoll
+        }
+        return handlers
+    }
+
     public static func start(_ payload: TunnelStartPayload) async -> String? {
-        guard let handlers else { return unavailable }
+        guard let handlers = await ready() else { return unavailable }
         return await handlers.start(payload)
     }
 
     public static func stop() async -> String? {
-        guard let handlers else { return unavailable }
+        guard let handlers = await ready() else { return unavailable }
         await handlers.stop()
         return nil
     }
 
     public static func togglePause() async -> String? {
-        guard let handlers else { return unavailable }
+        guard let handlers = await ready() else { return unavailable }
         await handlers.togglePause()
         return nil
     }
 
     public static func panic() async -> String? {
-        guard let handlers else { return unavailable }
+        guard let handlers = await ready() else { return unavailable }
         await handlers.panic()
         return nil
     }
 
     public static func setRate(_ rate: Double) async -> String? {
-        guard let handlers else { return unavailable }
+        guard let handlers = await ready() else { return unavailable }
         await handlers.setRate(rate)
         return nil
     }

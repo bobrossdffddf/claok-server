@@ -337,7 +337,7 @@ mod tests {
             writer.finish().unwrap();
         }
 
-        bundle_pairing_record(&source, b"the-record", &output).unwrap();
+        bundle_pairing_record(&source, b"the-record", None, None, &output).unwrap();
 
         let mut archive = zip::ZipArchive::new(std::fs::File::open(&output).unwrap()).unwrap();
         let names: Vec<String> = archive.file_names().map(str::to_owned).collect();

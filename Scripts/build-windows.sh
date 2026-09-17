@@ -23,8 +23,8 @@ if [ "$TARGET" = "x86_64-pc-windows-gnu" ] && ! command -v x86_64-w64-mingw32-gc
   echo "mingw-w64 is missing: brew install mingw-w64"; exit 1
 fi
 
-if ! grep -q "^version = \"$CLOAK_VERSION.0\"$" "$DESKTOP/Cargo.toml"; then
-  /usr/bin/sed -i '' "s/^version = \".*\"$/version = \"$CLOAK_VERSION.0\"/" "$DESKTOP/Cargo.toml"
+if ! grep -q "^version = \"$CLOAK_CARGO_VERSION\"$" "$DESKTOP/Cargo.toml"; then
+  /usr/bin/sed -i '' "s/^version = \".*\"$/version = \"$CLOAK_CARGO_VERSION\"/" "$DESKTOP/Cargo.toml"
 fi
 
 cd "$DESKTOP"

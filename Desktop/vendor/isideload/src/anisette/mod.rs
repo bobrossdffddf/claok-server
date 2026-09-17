@@ -186,7 +186,7 @@ impl AnisetteDataGenerator {
 }
 
 /// The current time the way Apple writes it: 2026-09-11T20:45:15Z.
-fn apple_now() -> String {
+pub(crate) fn apple_now() -> String {
     let seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)

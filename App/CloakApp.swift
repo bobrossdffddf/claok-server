@@ -7,6 +7,11 @@ struct CloakApp: App {
     @State private var model = AppModel()
     @State private var scheduler = RunScheduler()
     @State private var licensing = LicenseController()
+    @Environment(\.scenePhase) private var scenePhase
+
+    init() {
+        RenewController.registerBackgroundTask()
+    }
 
     private let container: ModelContainer = {
         let schema = Schema([Place.self, SavedRoute.self, RecordedTrip.self, ScheduledRun.self, Routine.self])
@@ -35,10 +40,18 @@ struct CloakApp: App {
                     model.onAppear()
                     scheduler.attach(container: container, model: model)
                 }
-                .onOpenURL { _ in
-                    // LocalDevVPN bounces back here after switching its tunnel
-                    // on. Nothing to do but notice that it worked.
+                .onOpenURL { url in
+                    if url.host == "cellular" {
+                        CellularAssist.shared.handleCallback(url)
+                        return
+                    }
                     Task { await model.ensureTunnelUp() }
+                }
+                .onChange(of: scenePhase) { _, phase in
+                    guard phase == .active else { return }
+                    RenewController.shared.checkPendingOutcome()
+                    RenewController.shared.renewIfDue()
+                    RenewController.shared.scheduleBackgroundRefresh()
                 }
         }
         .modelContainer(container)
@@ -82,7 +95,7 @@ struct RootView: View {
                 LicenseView()
             case .refused(let reason):
                 LicenseRefusedView(reason: reason)
-            case .unlocked:
+            case .unlocked, .trial:
                 if model.isOnboarded && model.isSetupComplete {
                     MapScreen()
                 } else {
@@ -156,7 +169,7 @@ struct UpdateBanner: View {
                     Image(systemName: "xmark")
                         .font(.system(.caption2, weight: .bold))
                         .foregroundStyle(Palette.dim)
-                        .padding(6)
+                        .padding(4)
                 }
                 .buttonStyle(.plain)
             }

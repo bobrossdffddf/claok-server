@@ -99,11 +99,25 @@ public struct TunnelStartPayload: Codable, Sendable {
     public var loop: Bool
     public var seed: UInt64
     public var label: String
-    /// How far a held position is allowed to drift, in metres. A phone left on
-    /// a desk moves; one pinned to a single coordinate for hours does not.
+    /// How far a held position is allowed to move from the pin, in metres. A
+    /// phone left on a desk moves; one pinned to a single coordinate for hours
+    /// does not. Past `IdleJitter.walkingBeyond` the number stops describing
+    /// receiver error and starts describing ground to cover on foot, which is
+    /// how an airport terminal hold is expressed.
     public var dwellRadius: Double
     /// Set when this drive is a SHIELD run: the route driven at the limit.
     public var shieldMode: ShieldSettings.Mode?
+    /// The stretches of this route that are covered on foot, measured in
+    /// metres along it. The route builder knows this for certain, because it
+    /// is the one that asked Apple Maps for a walking route; the simulation
+    /// must not have to guess it back out of the speed limits.
+    ///
+    /// Optional on purpose, and not for tidiness: a synthesised decoder uses
+    /// `decodeIfPresent` for an optional, so a payload written before this
+    /// field existed still decodes. It also carries a real distinction. `nil`
+    /// means nobody decided and the simulation should work it out; `[]` means
+    /// the builder looked and there is no walking on this route.
+    public var walkingSpans: [WalkingLegs.Span]?
 
     public init(
         points: [Coordinate],
@@ -115,8 +129,9 @@ public struct TunnelStartPayload: Codable, Sendable {
         loop: Bool,
         seed: UInt64,
         label: String,
-        dwellRadius: Double = 6,
-        shieldMode: ShieldSettings.Mode? = nil
+        dwellRadius: Double = 4,
+        shieldMode: ShieldSettings.Mode? = nil,
+        walkingSpans: [WalkingLegs.Span]? = nil
     ) {
         self.points = points
         self.postedLimits = postedLimits
@@ -129,9 +144,10 @@ public struct TunnelStartPayload: Codable, Sendable {
         self.label = label
         self.dwellRadius = dwellRadius
         self.shieldMode = shieldMode
+        self.walkingSpans = walkingSpans
     }
 
-    public static func fixed(_ coordinate: Coordinate, label: String, dwellRadius: Double = 6) -> TunnelStartPayload {
+    public static func fixed(_ coordinate: Coordinate, label: String, dwellRadius: Double = 4) -> TunnelStartPayload {
         TunnelStartPayload(
             points: [coordinate],
             postedLimits: [],

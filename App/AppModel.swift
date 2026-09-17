@@ -32,19 +32,66 @@ final class AppModel: NSObject {
     private static let locationLog = Logger(subsystem: "app.cloak.ios", category: "observed-location")
     private static let driveLog = Logger(subsystem: "app.cloak.ios", category: "drive-plan")
     var isOnboarded: Bool
-    var persona: DriverPersona = .normal
-    var travelMode: TravelMode = .drive
+    var persona: DriverPersona = .normal {
+        // A different driver does not need a different route, only a different
+        // speed profile over the same one, so this regrades rather than
+        // spending another Apple Maps request.
+        didSet { if persona.id != oldValue.id { routeInputsChanged(needsNewRoute: false) } }
+    }
+    var travelMode: TravelMode = .drive {
+        didSet { if travelMode != oldValue { routeInputsChanged(needsNewRoute: true) } }
+    }
     var playbackRate: Double = 1
     var loopRoute = false
     var geofence: GeofenceGuard
     var banner: String?
     var isBusy = false
     var routeWaypoints: [RouteWaypoint] = []
-    var activePlan: RoutePlan?
+    /// Stops the person has said they do not actually make, keyed by the thing
+    /// in the road data they came from. Applied where the controls are handed
+    /// to the tunnel, so a light crossed off in the preview is a light the
+    /// drive does not wait at.
+    var suppressedControls: Set<String> = []
+    var activePlan: RoutePlan? {
+        didSet { if activePlan == nil { rehearsal = nil } }
+    }
+    /// Every route Apple Maps offered for the current stops, best first, each a
+    /// complete plan with its own line, road data, walks, travel time and
+    /// `label`. After a build `activePlan` is `routeAlternatives[selectedRouteIndex]`.
+    /// The first route arrives alone and the others join it once they are
+    /// finished, so this holds one route for a moment and then up to three.
+    var routeAlternatives: [RoutePlan] = []
+    /// Which of `routeAlternatives` is the active plan.
+    var selectedRouteIndex: Int = 0
+
+    /// Switches the active plan to another of the offered routes, without
+    /// asking Apple Maps again: the line is already known, only which one to
+    /// drive changes. A route built for other stops is refused.
+    func selectRoute(_ index: Int) {
+        var choice = RouteChoice(plans: routeAlternatives, selectedIndex: selectedRouteIndex)
+        guard choice.select(index, waypoints: routeWaypoints, mode: travelMode), let plan = choice.active else { return }
+        selectedRouteIndex = choice.selectedIndex
+        activePlan = plan
+        believability = grade(plan)
+        rehearsal = rehearse(plan)
+    }
     /// How convincing the built route looks, and why.
     var believability: Believability?
+    var rehearsal: Rehearsal?
     /// What the route builder is doing right now, for the UI to show.
     var routeStatus: String?
+    /// The pending automatic rebuild, so a second change cancels the first.
+    @ObservationIgnored private var rebuildTask: Task<Void, Never>?
+    /// The build the route on screen came from, kept so the Start button can
+    /// wait a moment for road data that is still on its way rather than
+    /// driving on defaults a second before it lands.
+    @ObservationIgnored private var pendingBuild: RouteBuild?
+    /// How long the Start button waits for road data that has not landed yet.
+    /// The map waits for none of it; a drive is worth a few seconds.
+    static let roadDataStartWait: TimeInterval = 12
+    /// One line, said once, when a route really has no road data.
+    static let noRoadDataNotice = "Speed limits and stops did not load. Cloak is using road type defaults and will try again."
+
     var recordingFixes: [SimulatedFix] = []
     var isRecording = false
     /// True when the recording captures the phone's real movement rather than
@@ -52,7 +99,9 @@ final class AppModel: NSObject {
     /// simulating, it records the real drive.
     var isRecordingReal = false
     /// How fast a simulated drive sits against the posted limits.
-    var speedHelp = SpeedHelp.load()
+    var speedHelp = SpeedHelp.load() {
+        didSet { routeInputsChanged(needsNewRoute: false) }
+    }
     var shield = ShieldSettings.load()
     /// Road data around a SHIELD drive, refreshed as the car leaves the box.
     private var shieldRoadBox: BoundingBox?
@@ -65,6 +114,12 @@ final class AppModel: NSObject {
     var hasRemotePairing = false
     var setupProblem: String?
     var autoStopMinutes = 0
+    /// Pause the simulation the moment the connection stops matching the pin,
+    /// rather than carrying on exposed until somebody notices.
+    var pauseWhenCoverBreaks: Bool {
+        didSet { AppGroup.defaults.set(pauseWhenCoverBreaks, forKey: "pauseWhenCoverBreaks") }
+    }
+    private(set) var pausedByCover = false
     var isPeeking = false
     var locationAuthorization: CLAuthorizationStatus = .notDetermined
     private let peek = LocationPeek()
@@ -91,8 +146,10 @@ final class AppModel: NSObject {
         } else {
             self.geofence = GeofenceGuard(center: Coordinate(latitude: 0, longitude: 0), isEnabled: false)
         }
+        self.pauseWhenCoverBreaks = defaults.object(forKey: "pauseWhenCoverBreaks") as? Bool ?? true
         super.init()
         self.autoStopMinutes = defaults.integer(forKey: "autoStopMinutes")
+        watchCover()
         reflector.install()
         registerLiveControl()
         locationManager.delegate = self
@@ -103,6 +160,13 @@ final class AppModel: NSObject {
         PairingHandoff.adoptRemoteRecord()
         hasPairing = pairingStore.hasRecord
         hasRemotePairing = RemotePairingBackend.storedRecord != nil
+        let engine = self.engine
+        RenewController.shared.ensureLink = { await engine.linkProblem() }
+        CellularAssist.shared.install()
+        TrialController.shared.onExpired = { [weak self] in
+            await self?.stop()
+            self?.banner = "Free minutes used up for today. Back to your real location."
+        }
     }
 
     /// True once this phone can reach its own developer services, by either
@@ -129,6 +193,24 @@ final class AppModel: NSObject {
         // understand. `requestAlwaysLocation()` is the one place that asks.
         applyLocationAuthorization(locationManager.authorizationStatus)
         startPolling()
+        Task { await linkInBackground() }
+    }
+
+    /// Brings the link up on launch, without anybody opening Settings.
+    ///
+    /// Once this phone has paired with itself the link is pure machinery, so
+    /// making somebody walk to Settings and tap "Pair without a computer"
+    /// every single time was busywork. It only runs when a pairing record
+    /// already exists, so it never hijacks first-run setup, and it stays quiet
+    /// on failure: whatever the person does next raises the real error.
+    func linkInBackground() async {
+        guard RemotePairingBackend.storedRecord != nil else { return }
+        guard !linkState.isReady else { return }
+        do {
+            try await startTunnelOnly()
+        } catch {
+            Self.driveLog.notice("background link did not come up: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// Background running depends entirely on this.
@@ -211,7 +293,16 @@ final class AppModel: NSObject {
     }
 
     /// True when the simulation will keep running with the app off screen.
-    var canRunInBackground: Bool { locationAuthorization == .authorizedAlways }
+    ///
+    /// While Using counts. With the location background mode declared, iOS
+    /// keeps a When In Use app running while it is receiving fixes (see
+    /// `startLocation`), and the engine was changed to rely on exactly that.
+    /// This still said Always only, so Settings opened with an orange warning
+    /// that the drive stops when you leave the app, right above Diagnostics
+    /// saying the opposite, and the Diagnostics one was the true one.
+    var canRunInBackground: Bool {
+        locationAuthorization == .authorizedAlways || locationAuthorization == .authorizedWhenInUse
+    }
 
     /// Whether the phone currently has the kind of interface iOS needs before
     /// it will offer its pairing service. Recomputed on every poll so the
@@ -226,8 +317,13 @@ final class AppModel: NSObject {
     private func startPolling() {
         pollTask?.cancel()
         pollTask = Task { [weak self] in
+            var tick = 0
             while !Task.isCancelled {
                 await self?.refreshSnapshot()
+                if tick % 600 == 0 {
+                    await MainActor.run { _ = RenewController.shared.renewIfDue() }
+                }
+                tick += 1
                 try? await Task.sleep(for: .seconds(1))
             }
         }
@@ -359,8 +455,14 @@ final class AppModel: NSObject {
     /// see what you are about to drive before committing to it.
     @discardableResult
     func previewRoute() async -> RoutePlan? {
+        // A route with only a destination starts where the phone really is.
+        // Nobody should have to understand that the first stop is the start
+        // before they can go anywhere.
+        if routeWaypoints.count == 1 {
+            guard await startFromRealPosition() else { return nil }
+        }
         guard routeWaypoints.count >= 2 else {
-            banner = "Add at least two stops."
+            banner = "Choose where you want to go."
             return nil
         }
         isBusy = true
@@ -368,9 +470,61 @@ final class AppModel: NSObject {
         defer { isBusy = false; routeStatus = nil }
 
         do {
-            let plan = try await routeBuilder.build(waypoints: routeWaypoints, mode: travelMode)
+            // The line comes back as soon as Apple Maps answers it. Its posted
+            // limits and its stops are still being fetched and land on the same
+            // route, by identity, a few seconds later. Waiting for them here is
+            // what made a route take the better part of a minute to appear.
+            let build = try await routeBuilder.beginRoutes(waypoints: routeWaypoints, mode: travelMode)
+            let plan = build.primary
+            // The stops or the mode changed while Apple Maps was answering.
+            // This route is for a trip that is no longer the one on screen.
+            guard plan.matches(waypoints: routeWaypoints, mode: travelMode) else { return nil }
+
+            var choice = RouteChoice()
+            choice.begin(with: plan)
+            routeAlternatives = choice.plans
+            selectedRouteIndex = choice.selectedIndex
             activePlan = plan
             believability = grade(plan)
+            rehearsal = rehearse(plan)
+            pendingBuild = build
+
+            // Held where the pending rebuild is held, so moving a stop or
+            // clearing the stops cancels it, and its Overpass requests with
+            // it. A regrade leaves it running. Whatever the handle held
+            // before is not cancelled here: it can be another build still
+            // waiting on its road data, and cancelling that would land a
+            // route with none. A late answer is thrown away by the checks
+            // below instead.
+            rebuildTask = Task { [weak self] in
+                // The road data first. The route on screen is on per class
+                // defaults until it lands, and the other offered routes are
+                // decided from it, so there is no point starting them sooner.
+                var settled = await build.settled()
+                guard !Task.isCancelled, let self else { return }
+                self.absorb(settled)
+
+                if settled.metadata.wasFallback {
+                    settled = await build.retryingRoadData()
+                    guard !Task.isCancelled else { return }
+                    self.absorb(settled)
+                    if settled.metadata.wasFallback, self.activePlan?.id == plan.id {
+                        self.banner = Self.noRoadDataNotice
+                    }
+                }
+
+                guard build.hasAlternatives else { return }
+                let all = await build.alternatives()
+                guard !Task.isCancelled else { return }
+                guard self.activePlan?.id == plan.id,
+                      plan.matches(waypoints: self.routeWaypoints, mode: self.travelMode) else { return }
+                var choice = RouteChoice(plans: self.routeAlternatives, selectedIndex: self.selectedRouteIndex)
+                guard choice.complete(with: all), let active = choice.active else { return }
+                self.routeAlternatives = choice.plans
+                self.selectedRouteIndex = choice.selectedIndex
+                // The same route relabelled, so nothing needs regrading.
+                self.activePlan = active
+            }
             return plan
         } catch let error as RouteBuilderError {
             banner = Self.describe(error)
@@ -381,6 +535,25 @@ final class AppModel: NSObject {
         }
     }
 
+    /// The same route again with its road data in place.
+    ///
+    /// The line, the walks and the travel time do not change, only what is
+    /// known about the roads under them, so the route keeps its identity and
+    /// its place in the choice. Nothing about a drive already running is
+    /// touched: swapping the speed profile under a car that is moving is how
+    /// you get a jump, and the drive that started on defaults finishes on them.
+    private func absorb(_ settled: RoutePlan) {
+        guard settled.matches(waypoints: routeWaypoints, mode: travelMode) else { return }
+        var choice = RouteChoice(plans: routeAlternatives, selectedIndex: selectedRouteIndex)
+        guard choice.refresh(with: settled) else { return }
+        routeAlternatives = choice.plans
+        selectedRouteIndex = choice.selectedIndex
+        guard let active = choice.active, activePlan?.id == active.id else { return }
+        activePlan = active
+        believability = grade(active)
+        rehearsal = rehearse(active)
+    }
+
     static func describe(_ error: RouteBuilderError) -> String {
         switch error {
         case .notEnoughWaypoints: "Add at least two stops."
@@ -389,26 +562,60 @@ final class AppModel: NSObject {
     }
 
     func startRoute(shieldMode: ShieldSettings.Mode? = nil) async {
+        if TrialController.shared.requirePaid(shieldMode == nil ? "Routes and driving" : "SHIELD") { return }
+        if routeWaypoints.count == 1 {
+            guard await startFromRealPosition() else { return }
+        }
         guard routeWaypoints.count >= 2 else {
-            banner = "Add at least two stops."
+            banner = "Choose where you want to go."
             return
         }
         isBusy = true
         routeStatus = "Asking Apple Maps for a route"
         defer { isBusy = false; routeStatus = nil }
         do {
-            let plan: RoutePlan
+            var plan: RoutePlan
             if let existing = activePlan {
+                // Whichever offered route is selected. Building again here would
+                // ask Apple Maps afresh and drive its first route instead.
                 plan = existing
             } else {
-                plan = try await routeBuilder.build(waypoints: routeWaypoints, mode: travelMode)
+                // Nothing is on screen, so whatever was on offer belonged to
+                // stops that have since been replaced.
+                var choice = RouteChoice(plans: routeAlternatives, selectedIndex: selectedRouteIndex)
+                choice.clear()
+                routeAlternatives = choice.plans
+                selectedRouteIndex = choice.selectedIndex
+                let build = try await routeBuilder.beginRoutes(waypoints: routeWaypoints, mode: travelMode)
+                pendingBuild = build
+                routeStatus = "Reading speed limits and stops"
+                let built = await build.settled(waitingUpTo: Self.roadDataStartWait)
+                choice.begin(with: built)
+                routeAlternatives = choice.plans
+                selectedRouteIndex = choice.selectedIndex
+                plan = built
             }
+
+            // The route on screen never waited for its road data, so it may
+            // still be on per class defaults. A drive is worth a short wait for
+            // the posted limits and the stop signs, and then it goes anyway.
+            if plan.metadata.wasFallback, let build = pendingBuild, build.primary.id == plan.id {
+                routeStatus = "Reading speed limits and stops"
+                let settled = await build.settled(waitingUpTo: Self.roadDataStartWait)
+                if !settled.metadata.wasFallback, settled.matches(waypoints: routeWaypoints, mode: travelMode) {
+                    absorb(settled)
+                    plan = settled
+                }
+            }
+            if plan.metadata.wasFallback { banner = Self.noRoadDataNotice }
+
             activePlan = plan
             believability = grade(plan)
             routeStatus = "Starting"
-            let densified = plan.polyline.densified(spacing: 5)
+            let profileStart = RouteTiming.now()
+            let densified = plan.polyline.densified(spacing: 4)
             let limits = plan.metadata.limits(along: densified, fallback: travelMode == .drive ? .residential : .footway)
-            let controls = plan.metadata.snappedControls(to: densified)
+            let controls = liveControls(plan.metadata.snappedControls(to: densified))
             Self.driveLog.notice("route \(Int(densified.length))m, \(plan.metadata.segments.count) roads known (fallback: \(plan.metadata.wasFallback)), \(controls.count) controls on route")
             if let lo = limits.min(), let hi = limits.max() {
                 let mean = limits.reduce(0, +) / Double(max(1, limits.count))
@@ -417,6 +624,11 @@ final class AppModel: NSObject {
             for control in controls {
                 Self.driveLog.notice("control \(control.kind.rawValue, privacy: .public) at \(Int(control.alongTrack))m \(control.coordinate.latitude),\(control.coordinate.longitude) minorOnly=\(control.appliesToMinorRoadOnly) signalled=\(control.isSignalled)")
             }
+            RouteTiming.done(
+                "profile",
+                profileStart,
+                "\(densified.points.count) points, \(plan.metadata.segments.count) roads, \(controls.count) controls"
+            )
             let payload = TunnelStartPayload(
                 points: densified.points,
                 postedLimits: limits,
@@ -427,7 +639,13 @@ final class AppModel: NSObject {
                 loop: shieldMode == nil && loopRoute,
                 seed: UInt64.random(in: 1...UInt64.max),
                 label: routeWaypoints.last?.title ?? "Route",
-                shieldMode: shieldMode
+                shieldMode: shieldMode,
+                // The builder already asked Apple Maps for the walking parts,
+                // so it knows which stretches are on foot. Carrying that here
+                // means the simulation never has to guess it back out of the
+                // speed limits, which is a guess that reads a mapped pavement
+                // beside the road as a footway.
+                walkingSpans: plan.walkingSpans
             )
             await send(.start(payload))
         } catch let error as RouteBuilderError {
@@ -440,13 +658,24 @@ final class AppModel: NSObject {
     /// Grades a built route against the things that actually give a simulated
     /// location away, so the weakness is visible before it runs rather than
     /// after somebody notices it.
+    /// The controls still in force, with anything the person crossed off in
+    /// the route preview taken out. Everything that describes the drive has to
+    /// go through here, or two cards on the same screen will disagree about
+    /// how many times the car stops.
+    func liveControls(_ controls: [TrafficControl]) -> [TrafficControl] {
+        guard !suppressedControls.isEmpty else { return controls }
+        return controls.filter { !suppressedControls.contains($0.suppressionKey) }
+    }
+
     private func grade(_ plan: RoutePlan) -> Believability {
-        let densified = plan.polyline.densified(spacing: 5)
+        let started = RouteTiming.now()
+        defer { RouteTiming.done("grade", started, "\(plan.metadata.segments.count) roads") }
+        let densified = plan.polyline.densified(spacing: 4)
         let limits = plan.metadata.limits(along: densified, fallback: travelMode == .drive ? .residential : .footway)
         return Believability.grade(
             plan: densified.points,
             postedLimits: limits,
-            controls: plan.metadata.snappedControls(to: densified),
+            controls: liveControls(plan.metadata.snappedControls(to: densified)),
             mode: travelMode,
             realPosition: realPosition,
             lastRunSignature: AppGroup.defaults.string(forKey: "lastRouteSignature"),
@@ -462,25 +691,178 @@ final class AppModel: NSObject {
                       points.count)
     }
 
-    /// Adds a stop and clears any built route, since the route no longer matches.
+    /// Makes where the phone really is the first stop of the route.
+    ///
+    /// Two things were wrong with the button this backs. It only appeared once
+    /// the app already had a real position, and the app only reads one while
+    /// something is simulating, so on a fresh launch it simply was not there.
+    /// And it appended, so "start from where I am" pressed after choosing a
+    /// destination put you at the end and built the route backwards.
+    ///
+    /// So this goes and finds the position if it has to, and inserts at the
+    /// front. If the route already starts where you are it does nothing.
+    @discardableResult
+    func startFromRealPosition() async -> Bool {
+        guard let here = await realPositionNow() else {
+            banner = "Cloak cannot see where you are yet. Allow location for Cloak in Settings, then try again."
+            return false
+        }
+        if let first = routeWaypoints.first, first.coordinate.distance(to: here) < Self.sameSpot {
+            return true
+        }
+        routeWaypoints.insert(RouteWaypoint(coordinate: here, title: "Where I am"), at: 0)
+        routeInputsChanged(needsNewRoute: true)
+        return true
+    }
+
+    /// Closer than this and two points are the same place for a route.
+    static let sameSpot: Double = 30
+
+    /// The real position, fetched if it is not already known.
+    ///
+    /// Tries the last position this app saw, then CoreLocation's own cached
+    /// fix as long as it is not a simulated one, then asks for a single fix
+    /// and waits a few seconds for it. Never returns a simulated position,
+    /// because while a simulation runs every app, this one included, is handed
+    /// the fake one.
+    func realPositionNow(timeout: Duration = .seconds(6)) async -> Coordinate? {
+        if let realPosition { return realPosition }
+
+        if let cached = locationManager.location,
+           cached.horizontalAccuracy >= 0,
+           cached.sourceInformation?.isSimulatedBySoftware != true {
+            let coordinate = Coordinate(cached.coordinate)
+            realPosition = coordinate
+            return coordinate
+        }
+
+        var asked = false
+        func askOnce() {
+            // One request, not one per poll. `requestLocation` can take several
+            // seconds, and calling it again restarts it, so asking on every
+            // pass would mean it never finishes.
+            guard !asked else { return }
+            let allowed = locationAuthorization == .authorizedWhenInUse || locationAuthorization == .authorizedAlways
+            guard allowed else { return }
+            asked = true
+            readRealPositionOnce()
+        }
+
+        if locationAuthorization == .notDetermined {
+            locationManager.requestWhenInUseAuthorization()
+        }
+        askOnce()
+
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if let realPosition { return realPosition }
+            try? await Task.sleep(for: .milliseconds(200))
+            // Covers the permission prompt being answered while this waits.
+            askOnce()
+        }
+        return realPosition
+    }
+
+    /// Adds a stop. The route no longer matches, so it is rebuilt.
     func addStop(_ coordinate: Coordinate, title: String) {
         routeWaypoints.append(RouteWaypoint(coordinate: coordinate, title: title))
+        routeInputsChanged(needsNewRoute: true)
+    }
+
+    /// Something about the route changed, so bring what is on screen back in
+    /// line with it.
+    ///
+    /// Two different kinds of change end up here. Moving a stop or switching
+    /// between driving and walking means the line itself is wrong and Apple
+    /// Maps has to be asked again, which costs a network request and is
+    /// debounced so that dragging a slider or adding three stops in a row does
+    /// not fire three of them. Changing the driver or the speed help leaves
+    /// the line exactly where it is and only changes how it is driven, so that
+    /// regrades in place with no request at all.
+    ///
+    /// Either way nothing is left stale on screen waiting for somebody to
+    /// press build, which is what used to happen.
+    func routeInputsChanged(needsNewRoute: Bool) {
+        // A new line clears every offered route and the choice between them.
+        // A regrade keeps both, and the active plan it regrades is the
+        // selected route.
+        var choice = RouteChoice(plans: routeAlternatives, selectedIndex: selectedRouteIndex)
+        choice.inputsChanged(needsNewRoute: needsNewRoute)
+        routeAlternatives = choice.plans
+        selectedRouteIndex = choice.selectedIndex
+
+        guard needsNewRoute else {
+            // A regrade moves no line, so it does not cancel a pending rebuild
+            // or the offered routes still being finished.
+            guard let plan = activePlan else { return }
+            believability = grade(plan)
+            rehearsal = rehearse(plan)
+            return
+        }
+
+        rebuildTask?.cancel()
+        // The road data still arriving belongs to the old line.
+        pendingBuild = nil
+        let hadPlan = activePlan != nil
         activePlan = nil
+        rehearsal = nil
+        if routeWaypoints.count < 2 {
+            believability = nil
+            return
+        }
+        // Only rebuild by itself for somebody who had already built one. On a
+        // first route, adding the second stop should not start a network
+        // request before they have said what they want.
+        guard hadPlan else { return }
+
+        rebuildTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(Self.rebuildSettle))
+            guard !Task.isCancelled else { return }
+            await self?.previewRoute()
+        }
+    }
+
+    /// How long to wait for the person to stop fiddling before asking Apple
+    /// Maps again.
+    static let rebuildSettle: Int = 450
+
+    /// Plays the plan through the motion engine offline and grades the trace it
+    /// would produce, so the drive can be judged before it runs.
+    private func rehearse(_ plan: RoutePlan) -> Rehearsal {
+        let started = RouteTiming.now()
+        defer { RouteTiming.done("rehearse", started, "\(Int(plan.polyline.length))m") }
+        let seed = UInt64(bitPattern: Int64(signature(for: plan.polyline.points).hashValue))
+        let profile = plan.speedProfile(
+            persona: persona,
+            speedHelp: speedHelp,
+            suppressing: suppressedControls,
+            seed: seed
+        )
+        return Rehearsal.run(profile: profile, persona: persona, mode: travelMode, seed: seed)
     }
 
     func removeStop(_ waypoint: RouteWaypoint) {
         routeWaypoints.removeAll { $0.id == waypoint.id }
-        activePlan = nil
+        routeInputsChanged(needsNewRoute: true)
     }
 
     func moveStops(from source: IndexSet, to destination: Int) {
         routeWaypoints.move(fromOffsets: source, toOffset: destination)
-        activePlan = nil
+        routeInputsChanged(needsNewRoute: true)
     }
 
     func clearStops() {
+        rebuildTask?.cancel()
         routeWaypoints.removeAll()
+        // The crossings off belonged to that route. Keeping them would let a
+        // key from an old route quietly match a light on a new one.
+        suppressedControls.removeAll()
+        var choice = RouteChoice(plans: routeAlternatives, selectedIndex: selectedRouteIndex)
+        choice.clear()
+        routeAlternatives = choice.plans
+        selectedRouteIndex = choice.selectedIndex
         activePlan = nil
+        rehearsal = nil
         believability = nil
     }
 
@@ -523,6 +905,7 @@ final class AppModel: NSObject {
 
     /// Replays a recording, optionally perturbed so it is never the same twice.
     func replay(_ trip: RecordedTrip, varying: Bool) async {
+        if TrialController.shared.requirePaid("Replaying trips") { return }
         let recorded = trip.fixes
         let fixes = varying
             ? TripVariation().apply(to: recorded, seed: UInt64(abs(Int(Date.now.timeIntervalSince1970) / 3600)) &+ UInt64(truncatingIfNeeded: trip.id.hashValue))
@@ -549,6 +932,7 @@ final class AppModel: NSObject {
         autoStopTask?.cancel()
         autoStopTask = nil
         await send(.stop)
+        await TrialController.shared.end()
     }
 
     func peekRealLocation() async {
@@ -604,7 +988,22 @@ final class AppModel: NSObject {
     /// Pulls the developer disk image down from the licence server. Nothing
     /// simulates until this has happened once.
     func fetchDeveloperImage() async {
-        let token = LicenseStore.savedToken
+        var token = LicenseStore.savedToken
+        if token == nil, TrialController.shared.isChosen {
+            // On the free trial the token is minted by the trial server. Get
+            // one before the download, and if the trial server refused, say
+            // that plainly instead of letting the download report the generic
+            // "needs an active licence", which is what made the trial look
+            // broken.
+            if TrialController.shared.token == nil { await TrialController.shared.refresh() }
+            token = TrialController.shared.token
+            if token == nil {
+                imageDelivery.markFailed(TrialController.shared.problem
+                    ?? "The free trial could not start. Check your connection and try again.")
+                hasDeveloperImage = DeveloperImageBundle.isPresent
+                return
+            }
+        }
         _ = await imageDelivery.fetch(token: token)
         hasDeveloperImage = DeveloperImageBundle.isPresent
     }
@@ -625,64 +1024,32 @@ final class AppModel: NSObject {
     /// do is drive the road you are about to drive, at a speed nobody will
     /// question, so start it as you pull out and it arrives shortly after you.
     @discardableResult
+    /// SHIELD: your real drive, reported at the speed the road allows.
+    ///
+    /// The hard constraint, measured and worth writing down because it is not
+    /// obvious: the instant Cloak reports a simulated position, iOS replaces
+    /// the location for **every** app, Cloak included. So while SHIELD is
+    /// running Cloak cannot see where the phone really is, and a shadow that
+    /// reacts to your live speed is therefore impossible. Anything claiming
+    /// otherwise either sits still, having nothing to follow, or invents a
+    /// path and drives it on its own.
+    ///
+    /// So SHIELD works from a route you set. You drive it for real, Cloak
+    /// reports you along the same road at the posted limit plus your chosen
+    /// allowance, and when you go faster than that the report falls behind and
+    /// catches up when you slow. Stops and signals come from the real road
+    /// data, so the reported drive brakes where the road makes you brake.
+    ///
+    /// It will not guess. Without a destination this used to build a path from
+    /// whatever roads were nearby and loop it forever, which is exactly why it
+    /// appeared to set off while the car was parked.
     func startShield() async -> String? {
-        // Press and go: if a route is set, drive it; otherwise generate one
-        // from where the phone is by following the roads it is on. No
-        // destination required.
-        if routeWaypoints.count >= 2 {
-            await startRoute(shieldMode: shield.mode)
-            return (snapshot.isRunning == false) ? banner : nil
+        if TrialController.shared.requirePaid("SHIELD") { return nil }
+        guard !routeWaypoints.isEmpty else {
+            return "SHIELD needs to know where you are going. Choose a destination in Route first, then start SHIELD and drive it."
         }
-        return await startFreeShield()
-    }
-
-    /// SHIELD with no destination: read the roads around the car and build a
-    /// path that follows them from here, then drive it at the limit.
-    private func startFreeShield() async -> String? {
-        if locationAuthorization == .notDetermined { requestAlwaysLocation() }
-        let allowed = locationAuthorization == .authorizedAlways || locationAuthorization == .authorizedWhenInUse
-        guard allowed else { return "SHIELD needs location access so it can follow the road you are on." }
-
-        if realPosition == nil { locationManager.requestLocation() }
-        for _ in 0..<40 where realPosition == nil { try? await Task.sleep(for: .milliseconds(250)) }
-        guard let start = realPosition else { return "Waiting for a GPS fix. Try again in a moment." }
-
-        isBusy = true
-        routeStatus = "Reading the roads around you"
-        defer { isBusy = false; routeStatus = nil }
-
-        let box = BoundingBox(
-            minLatitude: start.latitude - 0.03, minLongitude: start.longitude - 0.04,
-            maxLatitude: start.latitude + 0.03, maxLongitude: start.longitude + 0.04
-        )
-        let cache = shieldRoadCache
-        let overpass = shieldOverpass
-        let metadata = await cache.metadata(for: box) { try await overpass.fetch(box: $0) }
-
-        let heading: Double? = observedLocation.map(\.course).flatMap { $0 >= 0 ? $0 : nil }
-        guard let points = AutoDrive.path(from: start, heading: heading, metres: 12_000, metadata: metadata),
-              points.count >= 2 else {
-            return "No roads found around you to follow. Try again where the map knows the streets."
-        }
-
-        let polyline = Polyline(points: points).densified(spacing: 5)
-        let limits = metadata.limits(along: polyline, fallback: .residential)
-        let controls = metadata.snappedControls(to: polyline)
-        let payload = TunnelStartPayload(
-            points: polyline.points,
-            postedLimits: limits,
-            controls: controls,
-            personaID: DriverPersona.shield(allowanceMph: shield.mode.allowanceMph).id,
-            mode: .drive,
-            playbackRate: 1,
-            loop: true,
-            seed: UInt64.random(in: 1...UInt64.max),
-            label: "SHIELD",
-            shieldMode: shield.mode
-        )
-        activePlan = nil
-        await send(.start(payload))
-        return (snapshot.isRunning == false) ? banner : nil
+        await startRoute(shieldMode: shield.mode)
+        return snapshot.isRunning ? nil : banner
     }
 
     /// Fetches the roads around the car once it strays outside the last box.
@@ -781,6 +1148,18 @@ final class AppModel: NSObject {
         }
     }
 
+    func dropLinkForTest() async {
+        guard !snapshot.isRunning else { return }
+        await engine.dropLink()
+        try? await Task.sleep(for: .milliseconds(800))
+    }
+
+    func linkProblemForTest() async -> String? {
+        guard !snapshot.isRunning else { return "Stop the simulation before testing." }
+        guard await reflector.ensureUp() else { return reflectorProblem ?? "The tunnel would not start." }
+        return await engine.probe()
+    }
+
     func togglePause() async {
         await send(snapshot.isPaused ? .resume : .pause)
     }
@@ -814,6 +1193,7 @@ final class AppModel: NSObject {
 
     func panic() async {
         await send(.panic)
+        await TrialController.shared.end()
         await reflector.stop()
         snapshot = .stopped
     }
@@ -869,10 +1249,19 @@ final class AppModel: NSObject {
     private func send(_ command: TunnelCommand) async {
         // Checked here as well as at the root, and checked properly rather
         // than by reading a flag somebody set earlier.
-        if case .start = command, !Licensing.verifiedNow {
-            banner = "Cloak needs an active licence to start a simulation."
-            return
+        if case .start(let payload) = command, !Licensing.verifiedNow {
+            let trial = TrialController.shared
+            guard trial.isActive else {
+                banner = "Cloak needs an active licence to start a simulation."
+                return
+            }
+            if payload.points.count != 1 || payload.shieldMode != nil {
+                _ = trial.requirePaid("Routes and driving")
+                return
+            }
+            guard await trial.begin() else { return }
         }
+        if case .steer = command, TrialController.shared.requirePaid("The joystick") { return }
 
         guard await reflector.ensureUp() else {
             banner = reflectorProblem
@@ -882,8 +1271,61 @@ final class AppModel: NSObject {
         let reply = await engine.handle(command)
         if case .failed(let message) = reply { banner = message }
         snapshot = await engine.current
-        if case .start = command { armAutoStop() }
+        if case .start(let payload) = command {
+            armAutoStop()
+            if banner == nil, let warning = coverWarning(for: payload) { banner = warning }
+        }
         if case .steer = command { armAutoStop() }
+    }
+
+    private func watchCover() {
+        let exposure = ExposureController.shared
+        exposure.onCoverBroke = { [weak self] line in
+            guard let self, self.pauseWhenCoverBreaks, self.snapshot.isRunning, !self.snapshot.isPaused else { return }
+            Task { @MainActor in
+                await self.send(.pause)
+                self.pausedByCover = true
+                self.banner = "Paused. " + line
+                RenewController.notify(
+                    id: "cover-broke",
+                    title: "Cloak paused",
+                    body: line + " Fix the connection, then resume."
+                )
+            }
+        }
+        exposure.onCoverRestored = { [weak self] in
+            guard let self, self.pausedByCover else { return }
+            self.pausedByCover = false
+            self.banner = "Your connection matches the pin again. Resume when ready."
+            RenewController.notify(id: "cover-back", title: "Cover restored", body: "Your connection matches the pin again.")
+        }
+    }
+
+    /// One line, at the moment of starting, if something around the pin is
+    /// already giving it away. The place to find out is here, not from the
+    /// app the pin was meant for.
+    private func coverWarning(for payload: TunnelStartPayload) -> String? {
+        guard let first = payload.points.first else { return nil }
+        let exposure = ExposureController.shared
+        // Grade where the trip ends up, so this does not flip the graded pin
+        // to the route's start and straight back again.
+        exposure.track(pin: first, destination: payload.points.last)
+        guard let reading = exposure.reading else { return nil }
+        let worst = reading.problems.first { $0.severity == .bad }
+        guard let worst else { return nil }
+        switch worst.kind {
+        case .ip:
+            let distance = reading.ipDistance.map(Exposure.describe) ?? "a long way"
+            return "Started. Your connection comes out \(distance) from this pin. Open Exposure to fix that."
+        case .country:
+            return "Started. Your connection is in a different country from this pin. Open Exposure to fix that."
+        case .timeZone:
+            return "Started. Your clock is in the wrong zone for this pin. Open Exposure to fix that."
+        case .motion:
+            return "Started. The phone is still while you report movement. Apps that read motion will see both."
+        case .softwareFlag, .unchecked:
+            return nil
+        }
     }
 }
 
@@ -901,6 +1343,11 @@ extension AppModel: CLLocationManagerDelegate {
             coordinate: coordinate
         )
         let real = RealFix(coordinate: coordinate, speed: max(0, last.speed), timestamp: last.timestamp)
+        // iOS marks every fix it produced from a developer simulation. That is
+        // the one flag Cloak cannot hide from other apps, but it can certainly
+        // read it about itself, and it is the only way to tell a real fix from
+        // Cloak's own output while a simulation runs.
+        let isSimulated = last.sourceInformation?.isSimulatedBySoftware ?? false
         Task { @MainActor in
             if let previous = self.observedLocation {
                 let gap = last.timestamp.timeIntervalSince(previous.timestamp)
@@ -914,9 +1361,21 @@ extension AppModel: CLLocationManagerDelegate {
             }
             // While a simulation runs, CoreLocation hands every app the
             // simulated fix, this one included. Writing that into
-            // `realPosition` would put the real-location marker on top of
-            // the fake one and feed the geofence its own output.
-            if !self.snapshot.isRunning { self.realPosition = coordinate }
+            // `realPosition` would put the real-location marker on top of the
+            // fake one and feed the geofence its own output. Filtering on the
+            // simulated flag rather than on "is something running" means the
+            // real marker keeps moving with you even while you are spoofing,
+            // which is the point of showing it.
+            if !isSimulated { self.realPosition = coordinate }
+
+            // SHIELD follows the real drive. This is the feed that makes that
+            // true: without it the shadow got one fix at startup and never
+            // moved again, which is why it looked like it drove on its own.
+            // A simulated fix must never reach it or it would follow its own
+            // output in a circle.
+            if !isSimulated, self.snapshot.isRunning, self.snapshot.mode.isShield {
+                await self.engine.observeReal(real)
+            }
             self.observedLocation = observed
             if self.isRecording, self.isRecordingReal, last.horizontalAccuracy >= 0, last.horizontalAccuracy < 50 {
                 // A real trip, as driven. Course and speed come straight from

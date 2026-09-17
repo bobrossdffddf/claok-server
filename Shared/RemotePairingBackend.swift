@@ -77,6 +77,9 @@ public actor RemotePairingBackend: DeviceBackend {
         status.pin = object["pin"] as? String
         status.port = UInt16((object["port"] as? Int) ?? 0)
         status.identifier = object["identifier"] as? String
+        if status.state == "ready", let winner = object["host"] as? String, !winner.isEmpty {
+            Self.rememberWinner(winner)
+        }
         if let txt = object["txt"] as? [String: String] { status.txt = txt }
 
         if let irk = status.altIrk, !irk.isEmpty,
@@ -166,13 +169,56 @@ public actor RemotePairingBackend: DeviceBackend {
         leading.append("\(LocalAddresses.reflector)|\(endpoint.port)")
         leading.append("\(LocalAddresses.reflector6)|\(endpoint.port)")
 
+        // Every IPv6 road this phone has, because IPv4 can be refused to this
+        // app outright and the reflector is IPv4 only. These go after the
+        // reflector and before the rest; each wrong one fails instantly.
+        for address in RemotePairingDiscovery.extraIPv6Candidates() {
+            let candidate = "\(address)|\(endpoint.port)"
+            if !leading.contains(candidate) { leading.append(candidate) }
+        }
+
         hosts.removeAll { leading.contains($0) }
-        // The phone's own interface addresses (scoped link-local, from the
-        // remoted advertisement) go first: on iOS 26.4+ that is where the
-        // only open pairing service lives, and it needs no reflector at all.
+        // The phone's own interface addresses, scoped link-local, from the
+        // remoted advertisement.
         let own = hosts.filter { $0.contains("%") }
         let rest = hosts.filter { !$0.contains("%") }
-        return (own + leading + rest).joined(separator: ",")
+
+        // Order matters far more than the list does.
+        //
+        // These used to go first, on the iOS 26.4 reasoning that the only open
+        // pairing service lives there and needs no reflector. On iOS 27 that
+        // is wrong and expensive: every direct address resets the handshake,
+        // because the service refuses a connection from the phone to itself,
+        // so putting them first spends several slow failures before reaching
+        // the one road that works. With a reflector up, it goes first.
+        var ordered = Reflector.isUp ? (leading + own + rest) : (own + leading + rest)
+
+        // Whatever carried the link last time goes ahead of all of it. The
+        // answer rarely changes between runs, and starting there turns a walk
+        // down the whole ladder into one connection.
+        if let winner = lastWinner {
+            let match = ordered.first { $0.components(separatedBy: "|").first == winner }
+            if let match {
+                ordered.removeAll { $0 == match }
+                ordered.insert(match, at: 0)
+            } else {
+                ordered.insert("\(winner)|\(endpoint.port)", at: 0)
+            }
+        }
+        return ordered.joined(separator: ",")
+    }
+
+    private static let winnerKey = "remotePairingWinner"
+
+    /// The address that carried the link last time, if any.
+    public static var lastWinner: String? {
+        let value = AppGroup.defaults.string(forKey: winnerKey)
+        return (value?.isEmpty == false) ? value : nil
+    }
+
+    static func rememberWinner(_ host: String) {
+        guard AppGroup.defaults.string(forKey: winnerKey) != host else { return }
+        AppGroup.defaults.set(host, forKey: winnerKey)
     }
 
     public static let wifiOffMessage = """

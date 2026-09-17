@@ -32,6 +32,14 @@ final class RunScheduler {
         // guidelines say not to show. It is asked the first time a run is
         // actually scheduled, which is when a notification would mean something.
         rebuildNotifications()
+        // A trip lives in memory and nowhere else, so nothing that was in the
+        // air when Cloak was last killed is in the air now. Any switch
+        // reminder still pending at launch belongs to a flight that is not
+        // happening, and left alone it would go off telling somebody to move
+        // a VPN exit for it.
+        if !JourneyController.shared.isRunning {
+            Self.disarmTripCues()
+        }
         start()
     }
 
@@ -59,6 +67,7 @@ final class RunScheduler {
     // MARK: - The tick
 
     private func tick() async {
+        if TrialController.shared.isActive { return }
         guard let container, let model else { return }
         let context = ModelContext(container)
 
@@ -175,7 +184,10 @@ final class RunScheduler {
         }
 
         let center = UNUserNotificationCenter.current()
-        center.removeAllPendingNotificationRequests()
+        center.getPendingNotificationRequests { requests in
+            let ours = requests.map(\.identifier).filter { !$0.hasPrefix("renew.") && !$0.hasPrefix("cloak.") }
+            center.removePendingNotificationRequests(withIdentifiers: ours)
+        }
 
         for run in runs where run.isEnabled {
             let content = UNMutableNotificationContent()
@@ -211,5 +223,93 @@ final class RunScheduler {
             center.add(UNNotificationRequest(
                 identifier: run.id.uuidString, content: content, trigger: trigger))
         }
+    }
+
+    // MARK: - Trip cues
+
+    /// Reminders for the moments in a journey when a change to the device is
+    /// invisible: the VPN exit and the phone's time zone, both switched while
+    /// the phone is in the air and reporting nothing.
+    ///
+    /// These live here rather than in a second notification system of their
+    /// own, because there is already exactly one place in the app that owns
+    /// the notification centre and it is this one. Every identifier begins
+    /// `cloak.journey.`, which is what keeps `rebuildNotifications` above from
+    /// sweeping them away the next time a schedule changes: it only clears
+    /// requests that are neither `renew.` nor `cloak.`.
+    nonisolated static let journeyCuePrefix = "cloak.journey."
+    private nonisolated static let remindsKey = "cloak.journey.reminds"
+
+    /// Whether the user has asked to be told. Off until they say otherwise;
+    /// nothing is ever scheduled, and no permission is ever asked for, until
+    /// this is turned on.
+    nonisolated static var remindsAboutTrips: Bool {
+        get { UserDefaults.standard.bool(forKey: remindsKey) }
+        set { UserDefaults.standard.set(newValue, forKey: remindsKey) }
+    }
+
+    /// Asks for notifications at the moment somebody opts in, and says whether
+    /// it worked.
+    ///
+    /// A refusal is an answer, not a failure: the caller turns the switch back
+    /// off and the trip runs exactly as it would have. Somebody who said no
+    /// once is not asked again by iOS, so `denied` is reported straight back
+    /// rather than sent into a prompt that will never appear.
+    static func askAboutTripCues() async -> Bool {
+        let center = UNUserNotificationCenter.current()
+        let settings = await center.notificationSettings()
+        switch settings.authorizationStatus {
+        case .authorized, .provisional, .ephemeral:
+            return true
+        case .denied:
+            return false
+        default:
+            return (try? await center.requestAuthorization(options: [.alert, .sound])) ?? false
+        }
+    }
+
+    /// Replaces whatever trip reminders were pending with these.
+    ///
+    /// Called again when the flight actually begins, because a drive to the
+    /// airport that ran long moves every moment after it and a reminder that
+    /// fires while the phone is still on the motorway is worse than none.
+    nonisolated static func armTripCues(_ cues: [Journey.Cue]) {
+        // Clearing and re-adding have to happen in that order, and both are
+        // asynchronous, so they share one task. Two separate ones would race
+        // and the clear could take the new reminders out with the old.
+        Task.detached {
+            let center = UNUserNotificationCenter.current()
+            await clearTripCues(on: center)
+            for cue in cues {
+                let wait = cue.at.timeIntervalSinceNow
+                // Anything already due is a moment that has passed. Firing it
+                // now would tell somebody to switch their VPN at the wrong end
+                // of the silence, which is the thing this exists to avoid.
+                guard wait > 5 else { continue }
+                let content = UNMutableNotificationContent()
+                content.title = cue.title
+                content.body = cue.body
+                content.sound = .default
+                content.threadIdentifier = "cloak.journey"
+                try? await center.add(UNNotificationRequest(
+                    identifier: journeyCuePrefix + cue.id,
+                    content: content,
+                    trigger: UNTimeIntervalNotificationTrigger(timeInterval: wait, repeats: false)
+                ))
+            }
+        }
+    }
+
+    /// Clears them. Stopping a trip has to stop its reminders, or the phone
+    /// tells you to change your VPN for a flight that is no longer happening.
+    nonisolated static func disarmTripCues() {
+        Task.detached { await clearTripCues(on: UNUserNotificationCenter.current()) }
+    }
+
+    private nonisolated static func clearTripCues(on center: UNUserNotificationCenter) async {
+        let pending = await center.pendingNotificationRequests()
+        let ours = pending.map(\.identifier).filter { $0.hasPrefix(journeyCuePrefix) }
+        guard !ours.isEmpty else { return }
+        center.removePendingNotificationRequests(withIdentifiers: ours)
     }
 }

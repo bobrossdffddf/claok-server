@@ -52,7 +52,7 @@ public actor DeviceLink {
 
     @discardableResult
     public func bringUp() async -> Bool {
-        guard Licensing.verifiedNow else {
+        guard Licensing.allowsSimulation else {
             set(.pairing, .failed("Cloak needs an active licence."))
             return false
         }

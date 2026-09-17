@@ -24,4 +24,15 @@ esac
 IFS=. read -r CLOAK_MAJOR CLOAK_MINOR CLOAK_PATCH <<< "$CLOAK_VERSION"
 CLOAK_BUILD=$(( 10#${CLOAK_MAJOR:-0} * 10000 + 10#${CLOAK_MINOR:-0} * 100 + 10#${CLOAK_PATCH:-0} ))
 
-export CLOAK_VERSION CLOAK_BUILD
+# Cargo insists on exactly three components. VERSION may carry two (1.6) or
+# three (1.6.8), so pad rather than appending a zero unconditionally:
+# appending to a three part version gives 1.6.8.0, which cargo rejects, and
+# that stopped the whole installer build the first time this project shipped a
+# patch number.
+case "$(echo "$CLOAK_VERSION" | tr -cd '.' | wc -c | tr -d ' ')" in
+  0) CLOAK_CARGO_VERSION="$CLOAK_VERSION.0.0" ;;
+  1) CLOAK_CARGO_VERSION="$CLOAK_VERSION.0" ;;
+  *) CLOAK_CARGO_VERSION="$CLOAK_VERSION" ;;
+esac
+
+export CLOAK_VERSION CLOAK_BUILD CLOAK_CARGO_VERSION

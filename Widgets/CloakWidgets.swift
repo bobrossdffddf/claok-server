@@ -34,24 +34,72 @@ struct StatusProvider: TimelineProvider {
 struct StatusWidgetView: View {
     var entry: StatusEntry
 
+    private var snapshot: SimulationSnapshot { entry.snapshot }
+
+    /// The widget only gets to redraw every minute or so, and the app stops
+    /// writing the snapshot the moment iOS suspends it. A fix older than a few
+    /// minutes means what follows is history, not status, and saying so is
+    /// better than showing a stale speed as though it were current.
+    private var isStale: Bool {
+        guard snapshot.isRunning, let stamp = snapshot.fix?.timestamp else { return false }
+        return entry.date.timeIntervalSince(stamp) > 300
+    }
+
+    private var headline: String {
+        if !snapshot.isRunning { return "Real location" }
+        if isStale { return "Not updating" }
+        if snapshot.isPaused { return "Paused" }
+        return snapshot.mode.activityWord
+    }
+
+    private var symbol: String {
+        if !snapshot.isRunning { return "location.slash" }
+        if isStale { return "exclamationmark.triangle.fill" }
+        if snapshot.isPaused { return "pause.fill" }
+        return snapshot.mode.symbol
+    }
+
+    private var accent: Color {
+        if !snapshot.isRunning { return .secondary }
+        if isStale || snapshot.isPaused { return .orange }
+        return .blue
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Label(entry.snapshot.isRunning ? "Simulating" : "Real location", systemImage: entry.snapshot.isRunning ? "location.fill" : "location.slash")
+            Label(headline, systemImage: symbol)
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(entry.snapshot.isRunning ? .blue : .secondary)
-            if let fix = entry.snapshot.fix {
-                Text(String(format: "%.4f", fix.coordinate.latitude))
-                    .font(.callout.monospacedDigit())
-                Text(String(format: "%.4f", fix.coordinate.longitude))
-                    .font(.callout.monospacedDigit())
-                Text("\(Int(Speed.toMph(fix.speed).rounded())) mph")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                .foregroundStyle(accent)
+                .lineLimit(1)
+
+            if snapshot.isRunning {
+                Text(snapshot.mode.subject)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.8)
+
+                if let fix = snapshot.fix {
+                    Text("\(Int(Speed.toMph(fix.speed).rounded())) mph")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+
+                if snapshot.distanceRemaining != nil {
+                    ProgressView(value: min(max(snapshot.progress, 0), 1))
+                        .progressViewStyle(.linear)
+                        .tint(accent)
+                    if let left = snapshot.distanceRemaining, left > 0 {
+                        Text(Units.distance(left) + " left")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             } else {
                 Text("Nothing running")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
+
             Spacer(minLength: 0)
         }
         .containerBackground(.fill.tertiary, for: .widget)

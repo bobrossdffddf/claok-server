@@ -17,6 +17,7 @@ use idevice::IdeviceService;
 
 pub mod lpair;
 pub mod renew;
+pub mod signin;
 pub mod rp;
 
 const DVT_SERVICE: &str = "com.apple.instruments.dtservicehub";

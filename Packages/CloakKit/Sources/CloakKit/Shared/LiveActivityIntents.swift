@@ -15,7 +15,10 @@ import AppIntents
 /// nothing at all. One type, in a package both link, is the fix.
 ///
 /// `LiveActivityIntent` is what makes iOS run these inside Cloak's own process
-/// instead of the widget's, which is the other half of the same problem.
+/// instead of the widget's, which is the other half of the same problem. It
+/// also means the press can arrive while the app is still being launched in
+/// the background, which is why every one of these goes through `LiveControl`
+/// rather than reaching for the model directly.
 public struct StopSimulationIntent: LiveActivityIntent {
     public static let title: LocalizedStringResource = "Stop simulating"
     public static let description = IntentDescription("Return to the real location.")
@@ -40,9 +43,15 @@ public struct TogglePauseIntent: LiveActivityIntent {
     public init() {}
 
     @MainActor
-    public func perform() async throws -> some IntentResult {
-        _ = await LiveControl.togglePause()
-        return .result()
+    public func perform() async throws -> some IntentResult & ProvidesDialog {
+        // Read which way this press is going before it happens: the snapshot
+        // behind the Live Activity is a second or so behind the engine, so
+        // asking afterwards can report the state the button just left.
+        let wasPaused = LiveControl.snapshot.isPaused
+        if let problem = await LiveControl.togglePause() {
+            return .result(dialog: .init(stringLiteral: problem))
+        }
+        return .result(dialog: wasPaused ? "Carrying on." : "Held where it is.")
     }
 }
 

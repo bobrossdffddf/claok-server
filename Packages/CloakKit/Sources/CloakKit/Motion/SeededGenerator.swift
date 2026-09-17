@@ -24,6 +24,12 @@ public struct SeededGenerator: RandomNumberGenerator, Sendable {
         double(in: 0...1) < probability
     }
 
+    /// A whole number in 0..<upperBound, evenly. Used to pick from a shortlist.
+    public mutating func uniformIndex(below upperBound: Int) -> Int {
+        guard upperBound > 1 else { return 0 }
+        return Int(next() % UInt64(upperBound))
+    }
+
     public mutating func gaussian(mean: Double, deviation: Double) -> Double {
         let u1 = max(double(in: 0...1), 1e-12)
         let u2 = double(in: 0...1)

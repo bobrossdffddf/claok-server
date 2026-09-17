@@ -39,6 +39,12 @@ pub struct GrandSlam {
 ///
 /// So nothing is slowed down until Apple actually objects. A 429 sets a cooling
 /// off period that later requests wait out, and the first success clears it.
+/// A ceiling on a single gsa.apple.com request, for the same reason the
+/// developer requests have one: nothing here had a timeout, so a socket that
+/// was accepted and then went quiet held up the whole sign-in indefinitely.
+/// The 429 backoff below is separate and still applies on top of this.
+const GS_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+
 const BACKOFF: std::time::Duration = std::time::Duration::from_secs(12);
 const MAX_ATTEMPTS: u32 = 4;
 
@@ -196,6 +202,7 @@ impl GrandSlam {
 
             let resp = self
                 .post(url)?
+                .timeout(GS_REQUEST_TIMEOUT)
                 .headers(extra.clone())
                 .body(payload.clone())
                 .send()

@@ -31,11 +31,24 @@ public enum Licensing {
     /// side check and a determined person can patch all of them; what stops
     /// that being enough is that the developer disk image is not in the app
     /// at all, and only the server hands it over.
+    public static var allowsSimulation: Bool {
+        verifiedNow || TrialGate.isOpen
+    }
+
     public static var verifiedNow: Bool {
         guard isConfigured else { return true }
         guard let raw = AppGroup.defaults.string(forKey: "licenseToken"),
               let token = LicenseToken.parse(raw) else { return false }
         return !token.isExpired && token.device == DeviceIdentity.id
+    }
+}
+
+public enum TrialGate {
+    nonisolated(unsafe) public static var closesAt: Date?
+
+    public static var isOpen: Bool {
+        guard let closesAt else { return false }
+        return closesAt > .now
     }
 }
 

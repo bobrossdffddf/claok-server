@@ -1,0 +1,1259 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Cloak</title>
+<meta name="description" content="Cloak changes the location every app on your iPhone reads. It drives there instead of jumping. No jailbreak, no computer after the first install.">
+<meta name="theme-color" content="#0C1015">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,600;12..96,700;12..96,800&family=Caveat:wght@500;600&family=JetBrains+Mono:wght@500&display=swap">
+<style>
+:root{
+  color-scheme:dark;
+  --ground:#0C1015;
+  --ground-2:#101520;
+  --surface:#161C23;
+  --raised:#20282F;
+  --floating:#29323B;
+  --hairline:rgba(255,255,255,.10);
+  --hairline-2:rgba(255,255,255,.06);
+  --accent:#3BE0C8;
+  --accent-deep:#16A392;
+  --accent-ink:#06211D;
+  --warn:#FBB353;
+  --danger:#FF6B6F;
+  --ok:#4FE096;
+  --text:#EEF2F5;
+  --dim:#A9B3BD;
+  --faint:#909CAA;
+  --pen:#F3E9C8;
+  --font-display:"Bricolage Grotesque",-apple-system,BlinkMacSystemFont,"SF Pro Display","Helvetica Neue",Arial,sans-serif;
+  --font-ui:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",Arial,sans-serif;
+  --font-hand:"Caveat","Bradley Hand","Segoe Print","Comic Sans MS",cursive;
+  --font-mono:"JetBrains Mono","SF Mono",Menlo,Consolas,monospace;
+  --r-chip:10px; --r:14px; --r-card:20px; --r-sheet:28px; --r-pill:980px;
+  --shadow-1:0 1px 2px rgba(0,0,0,.25),0 8px 24px rgba(0,0,0,.28);
+  --shadow-2:0 2px 6px rgba(0,0,0,.3),0 30px 80px rgba(0,0,0,.5);
+  --ease:cubic-bezier(.32,.72,0,1);
+  --ease-out:cubic-bezier(.25,.1,.25,1);
+  --spring:cubic-bezier(.34,1.56,.64,1);
+  --gutter:clamp(16px,4vw,32px);
+  --max:1120px;
+}
+*,*::before,*::after{box-sizing:border-box}
+html{scroll-behavior:smooth;-webkit-text-size-adjust:100%}
+body{
+  margin:0;background:var(--ground);color:var(--text);
+  font-family:var(--font-ui);font-size:17px;line-height:25px;
+  -webkit-font-smoothing:antialiased;overflow-x:clip;
+}
+img,svg,canvas{max-width:100%;display:block}
+a{color:inherit;text-decoration:none}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
+:focus-visible{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}
+[hidden]{display:none!important}
+::selection{background:rgba(59,224,200,.35)}
+
+h1,h2,h3{font-family:var(--font-display);margin:0;text-wrap:balance;font-variation-settings:"opsz" 96}
+h1{font-size:clamp(40px,5.2vw,64px);line-height:.98;font-weight:800;letter-spacing:-.03em}
+h2{font-size:clamp(32px,4.6vw,48px);line-height:1.04;font-weight:700;letter-spacing:-.025em}
+h3{font-size:21px;line-height:26px;font-weight:600;letter-spacing:-.01em;font-variation-settings:"opsz" 24}
+p{margin:0}
+.lede{font-size:19px;line-height:29px;color:var(--dim);max-width:34em}
+.small{font-size:15px;line-height:22px;color:var(--dim)}
+.cap{font-size:13px;line-height:18px;color:var(--faint);letter-spacing:.005em}
+.mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums;letter-spacing:0}
+.hand{font-family:var(--font-hand);font-weight:600;color:var(--pen);font-size:26px;line-height:1.05;letter-spacing:0}
+
+.wrap{max-width:var(--max);margin-inline:auto;padding-inline:var(--gutter)}
+section{padding-block:clamp(72px,11vw,140px)}
+.center{text-align:center}
+.center .lede{margin-inline:auto}
+.stack{display:grid;gap:16px}
+
+/* ---------- nav ---------- */
+.nav-wrap{position:sticky;top:12px;z-index:50;display:flex;justify-content:center;pointer-events:none;container-type:scroll-state;container-name:topnav;overflow-anchor:none}
+.nav{
+  pointer-events:auto;display:flex;align-items:center;gap:4px;
+  padding:6px 8px 6px 10px;border-radius:var(--r-pill);
+  background:rgba(22,28,35,.74);
+  backdrop-filter:blur(24px) saturate(180%);-webkit-backdrop-filter:blur(24px) saturate(180%);
+  border:.5px solid rgba(255,255,255,.12);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.06),0 1px 2px rgba(0,0,0,.2);
+  transition:box-shadow .3s var(--ease),transform .3s var(--ease)
+}
+@container topnav scroll-state(stuck:top){.nav{box-shadow:inset 0 1px 0 rgba(255,255,255,.06),var(--shadow-2)}}
+.nav .brand{display:flex;align-items:center;gap:8px;padding:4px 10px 4px 2px;font-family:var(--font-display);font-weight:700;font-size:18px;letter-spacing:-.01em}
+.nav .brand img{width:28px;height:28px;border-radius:8px}
+.nav a.item{padding:8px 12px;border-radius:var(--r-pill);font-size:15px;color:var(--dim);transition:color .15s var(--ease-out),background .15s var(--ease-out)}
+.nav a.item:hover{color:var(--text);background:rgba(255,255,255,.06)}
+.nav .cta{margin-left:6px}
+@media (max-width:640px){.nav a.item{display:none}.nav .cta{margin-left:0}}
+@media (prefers-reduced-transparency:reduce){.nav{background:var(--raised);backdrop-filter:none;-webkit-backdrop-filter:none}}
+
+/* ---------- buttons ---------- */
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:8px;
+  min-height:44px;padding:10px 20px;border-radius:var(--r-pill);
+  font-size:17px;font-weight:500;line-height:1;white-space:nowrap;
+  transition:transform .15s var(--ease-out),filter .15s var(--ease-out),background .15s var(--ease-out);
+  will-change:transform
+}
+.btn:hover{transform:translateY(-1px);filter:brightness(1.06)}
+.btn:active{transform:scale(.97)}
+.btn-primary{background:linear-gradient(135deg,var(--accent),var(--accent-deep));color:var(--accent-ink);font-weight:600;box-shadow:0 8px 24px rgba(59,224,200,.18)}
+.btn-ghost{background:var(--raised);color:var(--text);border:.5px solid var(--hairline)}
+.btn-sm{min-height:36px;padding:6px 14px;font-size:15px}
+.btn svg{width:18px;height:18px;flex:none}
+.btn-row{display:flex;flex-wrap:wrap;gap:12px;align-items:center}
+.btn-note{font-size:13px;color:var(--faint);width:100%}
+
+/* ---------- hero ---------- */
+.hero{position:relative;padding-block:clamp(48px,7vw,96px) clamp(48px,6vw,80px);overflow:clip}
+.hero-bg{position:absolute;inset:0;z-index:-1;pointer-events:none}
+.hero-bg canvas{width:100%;height:100%}
+.hero-bg::after{content:"";position:absolute;inset:0;background:
+  radial-gradient(60% 50% at 70% 35%,rgba(59,224,200,.10),transparent 70%),
+  linear-gradient(to bottom,rgba(12,16,21,.2),var(--ground) 92%)}
+.hero-grid{display:grid;grid-template-columns:.92fr 1.08fr;gap:clamp(32px,5vw,64px);align-items:center}
+@media (max-width:860px){.hero-grid{grid-template-columns:1fr}}
+.hero h1 .line{display:block}
+.hero h1 em{font-style:normal;color:var(--text)}
+.hero .lede{margin-top:24px}
+.hero .btn-row{margin-top:32px}
+.pill-list{display:flex;flex-wrap:wrap;gap:8px 16px;margin-top:28px;padding:0;list-style:none}
+.pill-list li{display:flex;align-items:center;gap:8px;font-size:15px;color:var(--dim)}
+.pill-list svg{width:16px;height:16px;color:var(--accent)}
+
+/* load sequence */
+@media (prefers-reduced-motion:no-preference){
+  .rise{animation:rise .8s var(--ease) both}
+  .rise:nth-child(2){animation-delay:.08s}.rise:nth-child(3){animation-delay:.16s}.rise:nth-child(4){animation-delay:.24s}.rise:nth-child(5){animation-delay:.32s}
+  @keyframes rise{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:none}}
+  .phone-wrap{animation:phone-in 1s var(--ease) .25s both}
+  @keyframes phone-in{from{opacity:0;transform:translateY(40px) rotate(-1deg)}to{opacity:1;transform:none}}
+}
+
+/* ---------- phone ---------- */
+.phone-wrap{position:relative;display:grid;grid-template-columns:1fr auto 1fr;align-items:center;padding:24px 0}
+@media (max-width:1180px){.phone-wrap{grid-template-columns:1fr;justify-items:center}}
+.phone{
+  position:relative;width:min(330px,88vw);aspect-ratio:330/690;border-radius:52px;
+  background:#000;padding:10px;box-shadow:var(--shadow-2),0 0 0 .5px rgba(255,255,255,.18) inset,0 0 0 1.5px #1a1f26;
+}
+.phone .screen{position:relative;width:100%;height:100%;border-radius:42px;overflow:hidden;background:#151C24;isolation:isolate}
+.phone .island{position:absolute;top:12px;left:50%;transform:translateX(-50%);width:96px;height:28px;border-radius:20px;background:#000;z-index:5}
+.phone .clock{position:absolute;top:16px;left:26px;font-weight:600;font-size:14px;z-index:5;font-family:var(--font-ui);letter-spacing:-.01em}
+.phone .status{position:absolute;top:18px;right:26px;z-index:5;display:flex;gap:4px;align-items:center}
+.phone .status i{display:block;width:3px;background:#fff;border-radius:1px}
+.phone .map{position:absolute;inset:0;width:100%;height:100%}
+.phone .topchip{
+  position:absolute;top:52px;left:14px;right:70px;z-index:4;
+  display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:18px;
+  background:rgba(32,40,47,.86);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+  border:.5px solid var(--hairline);box-shadow:var(--shadow-1)
+}
+.topchip .dot{width:8px;height:8px;border-radius:50%;background:var(--faint);flex:none;transition:background .3s,box-shadow .3s}
+.topchip.on .dot{background:var(--accent);box-shadow:0 0 0 4px rgba(59,224,200,.2)}
+.topchip .t{font-size:14px;font-weight:600;line-height:17px}
+.topchip .s{font-size:11.5px;color:var(--dim);line-height:14px}
+.topchip .s.mono{font-size:11px}
+.phone .side{position:absolute;right:14px;top:52px;z-index:4;display:grid;gap:8px}
+.phone .side span{width:38px;height:38px;border-radius:50%;background:rgba(32,40,47,.86);border:.5px solid var(--hairline);display:grid;place-items:center;color:var(--text)}
+.phone .side svg{width:16px;height:16px}
+.sheet{
+  position:absolute;left:8px;right:8px;bottom:8px;z-index:4;
+  background:rgba(22,28,35,.96);border:.5px solid var(--hairline);border-radius:28px;
+  padding:8px 12px 12px;box-shadow:var(--shadow-2)
+}
+.sheet .grab{width:36px;height:4px;border-radius:2px;background:rgba(255,255,255,.22);margin:0 auto 10px}
+.tabs{display:flex;background:var(--raised);border-radius:14px;padding:3px}
+.tabs button{flex:1;padding:7px 0;font-size:13px;font-weight:500;border-radius:11px;color:var(--dim);transition:background .2s var(--ease),color .2s}
+.tabs button[aria-selected=true]{background:var(--floating);color:var(--text)}
+.search{display:flex;align-items:center;gap:8px;margin-top:10px;padding:9px 12px;border-radius:12px;background:var(--raised);color:var(--faint);font-size:13.5px;min-height:38px;overflow:hidden}
+.search svg{width:15px;height:15px;flex:none}
+.search .q{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text)}
+.search .caret{width:1.5px;height:15px;background:var(--accent);animation:blink 1s steps(2) infinite}
+@keyframes blink{50%{opacity:0}}
+.place{margin-top:10px;background:var(--raised);border-radius:16px;padding:10px 12px 12px}
+.place .row{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:14px;font-weight:600;margin-bottom:10px}
+.place .row .mono{font-weight:500;font-size:11.5px;color:var(--dim)}
+.teleport{
+  width:100%;min-height:44px;border-radius:12px;font-size:15px;font-weight:600;color:var(--accent-ink);
+  background:linear-gradient(135deg,var(--accent),var(--accent-deep));
+  transition:transform .12s var(--ease-out),filter .2s;position:relative;overflow:hidden
+}
+.teleport:active{transform:scale(.97)}
+.teleport.busy{filter:saturate(.6) brightness(.85)}
+.teleport .bar{position:absolute;left:0;bottom:0;height:3px;width:0;background:rgba(6,33,29,.45)}
+.teleport.busy .bar{width:100%;transition:width .9s linear}
+.drive{margin-top:10px;display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;background:var(--raised);border-radius:16px;padding:10px 12px}
+.drive .t{font-size:14px;font-weight:600}
+.drive .s{font-size:11.5px;color:var(--dim)}
+.drive .prog{height:3px;border-radius:2px;background:var(--floating);margin-top:8px;overflow:hidden}
+.drive .prog i{display:block;height:100%;width:0;background:var(--accent);transition:width .3s linear}
+.speedo{width:54px;height:54px;border-radius:50%;display:grid;place-items:center;background:conic-gradient(var(--accent) var(--v,0%),var(--floating) 0);position:relative}
+.speedo::after{content:"";position:absolute;inset:5px;border-radius:50%;background:var(--raised)}
+.speedo b{position:relative;z-index:1;font-size:15px;font-weight:700;line-height:1;font-variant-numeric:tabular-nums}
+.speedo b small{display:block;font-size:8px;font-weight:500;color:var(--dim);margin-top:2px}
+
+/* annotations */
+.note{position:relative;pointer-events:none;z-index:2;width:118px}
+.note svg{width:70px;height:auto;color:var(--pen);overflow:visible}
+.note.n1{justify-self:end;align-self:end;margin:0 4px 64px 0;text-align:right}
+.note.n2{justify-self:start;align-self:start;margin:150px -34px 0 4px}
+@media (max-width:1180px){.note{display:none}}
+.note path{stroke:currentColor;stroke-width:2;fill:none;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:1000;stroke-dashoffset:1000}
+@media (prefers-reduced-motion:no-preference){.note path{animation:draw 1.2s var(--ease-out) 1.1s forwards}@keyframes draw{to{stroke-dashoffset:0}}}
+@media (prefers-reduced-motion:reduce){.note path{stroke-dashoffset:0}}
+
+/* ---------- marquee ---------- */
+.marquee-sec{padding-block:0 clamp(48px,7vw,96px)}
+.marquee-head{display:flex;align-items:baseline;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:24px}
+.marquee{position:relative;overflow:hidden;-webkit-mask-image:linear-gradient(to right,transparent,black 8%,black 92%,transparent);mask-image:linear-gradient(to right,transparent,black 8%,black 92%,transparent)}
+.marquee .track{display:flex;gap:10px;width:max-content;padding-block:5px}
+.marquee + .marquee{margin-top:10px}
+@media (prefers-reduced-motion:no-preference){
+  .marquee .track{animation:scroll 48s linear infinite}
+  .marquee.rev .track{animation-direction:reverse;animation-duration:56s}
+  .marquee:hover .track{animation-play-state:paused}
+  @keyframes scroll{to{transform:translateX(-50%)}}
+}
+.chip{display:inline-flex;align-items:center;gap:8px;padding:9px 14px 9px 11px;border-radius:var(--r-pill);background:var(--surface);border:.5px solid var(--hairline);font-size:15px;white-space:nowrap}
+.chip i{width:8px;height:8px;border-radius:50%;background:var(--ok);flex:none}
+.chip i.tell{background:var(--warn)}
+.chip small{color:var(--faint);font-size:12px}
+
+/* ---------- steps ---------- */
+.steps{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:48px;counter-reset:step}
+@media (max-width:760px){.steps{grid-template-columns:1fr}}
+.step{background:var(--surface);border-radius:var(--r-card);padding:24px;position:relative;overflow:hidden}
+.step .k{font-family:var(--font-display);font-weight:800;font-size:44px;line-height:1;color:var(--accent);letter-spacing:-.03em;font-variation-settings:"opsz" 96}
+.step h3{margin-top:14px}
+.step p{margin-top:8px;color:var(--dim);font-size:15px;line-height:22px}
+.step .art{margin-top:20px;height:110px;border-radius:12px;background:var(--raised);position:relative;overflow:hidden;display:grid;place-items:center}
+.step .art svg{width:100%;height:100%;overflow:visible}
+
+/* ---------- feature beats ---------- */
+.beat{display:grid;grid-template-columns:1fr 1fr;gap:clamp(32px,6vw,80px);align-items:center}
+.beat.flip>.copy{order:2}
+@media (max-width:860px){.beat,.beat.flip{grid-template-columns:1fr}.beat.flip>.copy{order:0}}
+.beat .copy h2{margin-top:12px}
+.beat .copy .lede{margin-top:20px;font-size:17px;line-height:26px}
+.beat .copy ul{margin:24px 0 0;padding:0;list-style:none;display:grid;gap:12px}
+.beat .copy li{display:flex;gap:12px;align-items:flex-start;color:var(--dim);font-size:15px;line-height:22px}
+.beat .copy li svg{width:18px;height:18px;flex:none;color:var(--accent);margin-top:2px}
+.beat .copy li b{color:var(--text);font-weight:600}
+.eyebrow{display:inline-flex;align-items:center;gap:8px;font-size:14px;color:var(--accent);font-weight:600}
+.eyebrow::before{content:"";width:18px;height:2px;background:var(--accent);border-radius:1px}
+.demo{background:var(--surface);border:.5px solid var(--hairline);border-radius:var(--r-sheet);padding:20px;box-shadow:var(--shadow-1);position:relative}
+.demo .bar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px;flex-wrap:wrap}
+.seg button{white-space:nowrap}
+.demo .bar .t{font-size:15px;font-weight:600}
+.seg{display:inline-flex;background:var(--raised);border-radius:12px;padding:3px;gap:2px}
+.seg button{padding:7px 14px;font-size:13px;font-weight:500;border-radius:9px;color:var(--dim);transition:background .2s var(--ease),color .2s}
+.seg button[aria-pressed=true]{background:var(--floating);color:var(--text)}
+
+/* journey demo */
+.jmap{position:relative;aspect-ratio:16/11;border-radius:16px;overflow:hidden;background:#11171E}
+.jmap svg{width:100%;height:100%}
+.jmap .tag{position:absolute;padding:6px 10px;border-radius:10px;background:rgba(32,40,47,.9);border:.5px solid var(--hairline);font-size:12px;font-weight:600;white-space:nowrap;box-shadow:var(--shadow-1);transition:opacity .3s,transform .3s var(--ease)}
+.jmap .tag small{display:block;font-weight:500;color:var(--dim);font-size:11px}
+.jmap .tag.bad{border-color:rgba(255,107,111,.5);color:var(--danger)}
+.jmap .tag.bad small{color:var(--danger);opacity:.8}
+.jmap .tag.good{border-color:rgba(59,224,200,.5)}
+.jmap .tag[hidden]{display:none}
+.jlog{margin-top:14px;display:grid;gap:6px;font-size:13px;line-height:18px}
+.jlog div{display:grid;grid-template-columns:64px 1fr;gap:12px;padding:6px 10px;border-radius:8px;background:var(--raised);opacity:0;transform:translateY(4px);transition:opacity .35s var(--ease),transform .35s var(--ease)}
+.jlog div.in{opacity:1;transform:none}
+.jlog .mono{color:var(--faint);font-size:12px}
+.jlog .bad{color:var(--danger)}
+.jlog .good{color:var(--accent)}
+
+/* exposure demo */
+.score{display:grid;grid-template-columns:auto 1fr;gap:20px;align-items:center;margin-bottom:16px}
+.ring{width:96px;height:96px;border-radius:50%;background:conic-gradient(var(--c,var(--danger)) var(--v,40%),var(--raised) 0);display:grid;place-items:center;position:relative;transition:--v .6s var(--ease)}
+.ring::after{content:"";position:absolute;inset:8px;border-radius:50%;background:var(--surface)}
+.ring b{position:relative;z-index:1;font-family:var(--font-display);font-weight:800;font-size:30px;letter-spacing:-.03em;font-variant-numeric:tabular-nums}
+.score .t{font-size:17px;font-weight:600}
+.score .s{font-size:14px;color:var(--dim);margin-top:2px}
+.leaks{display:grid;gap:8px}
+.leak{display:grid;grid-template-columns:22px 1fr auto;gap:12px;align-items:center;padding:12px 14px;border-radius:12px;background:var(--raised);transition:background .3s}
+.leak .ic{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;transition:background .3s,color .3s}
+.leak .ic svg{width:12px;height:12px}
+.leak[data-state=bad] .ic{background:rgba(255,107,111,.18);color:var(--danger)}
+.leak[data-state=ok] .ic{background:rgba(79,224,150,.18);color:var(--ok)}
+.leak[data-state=note] .ic{background:rgba(251,179,83,.18);color:var(--warn)}
+.leak .t{font-size:15px;font-weight:600}
+.leak .s{font-size:13px;color:var(--dim);line-height:18px}
+.leak .fix{font-size:12px;color:var(--faint);white-space:nowrap}
+@media (max-width:640px){.leak{grid-template-columns:22px 1fr}.leak .fix{grid-column:2;white-space:normal}.leak .fix:empty{display:none}}
+.toggles{display:grid;gap:8px;margin-top:16px}
+.toggle{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 14px;border-radius:12px;background:var(--raised);font-size:15px}
+.toggle span small{display:block;color:var(--faint);font-size:12px}
+.sw{width:46px;height:28px;border-radius:14px;background:var(--floating);position:relative;flex:none;transition:background .25s var(--ease)}
+.sw::after{content:"";position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.4);transition:transform .25s var(--spring)}
+.sw[aria-checked=true]{background:var(--accent-deep)}
+.sw[aria-checked=true]::after{transform:translateX(18px)}
+
+/* rehearse demo */
+.trace{position:relative;aspect-ratio:16/8;border-radius:16px;background:#11171E;overflow:hidden}
+.trace svg{width:100%;height:100%}
+.trace .lbl{position:absolute;left:14px;top:12px;font-size:12px;color:var(--faint)}
+.legend{display:flex;gap:16px;flex-wrap:wrap;margin-top:12px;font-size:13px;color:var(--dim)}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.legend i{width:14px;height:3px;border-radius:2px;display:inline-block}
+.verdict{margin-top:14px;padding:12px 14px;border-radius:12px;background:var(--raised);font-size:15px;line-height:21px;display:grid;grid-template-columns:auto 1fr;gap:12px;align-items:start}
+.verdict .g{font-family:var(--font-display);font-weight:800;font-size:28px;letter-spacing:-.03em;line-height:1;color:var(--accent);min-width:44px}
+.verdict .g.mid{color:var(--warn)}
+.verdict small{display:block;color:var(--dim);font-size:13px;margin-top:2px}
+.slider{margin-top:14px;display:grid;gap:6px;font-size:13px;color:var(--dim)}
+.slider input{width:100%;accent-color:var(--accent)}
+.slider .lbls{display:flex;justify-content:space-between;font-size:12px;color:var(--faint)}
+
+/* ---------- feature grid ---------- */
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:8px 32px;margin-top:48px}
+@media (max-width:860px){.grid3{grid-template-columns:repeat(2,1fr)}}
+@media (max-width:560px){.grid3{grid-template-columns:1fr}}
+.cell{padding:22px 22px 24px;border-radius:var(--r-card);background:var(--surface);border:.5px solid var(--hairline-2)}
+.grid3 .cell{background:none;border:0;border-top:.5px solid var(--hairline);border-radius:0;padding:24px 16px 8px 0}
+.cell .ic{width:40px;height:40px;border-radius:12px;background:var(--raised);display:grid;place-items:center;color:var(--accent);margin-bottom:16px}
+.cell .ic svg{width:20px;height:20px}
+.cell h3{font-size:17px;line-height:22px}
+.cell p{margin-top:6px;font-size:15px;line-height:22px;color:var(--dim)}
+
+/* ---------- trust ---------- */
+.trust{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:48px}
+@media (max-width:760px){.trust{grid-template-columns:1fr}}
+.trust .cell h3{display:flex;align-items:center;gap:10px}
+.trust .cell h3 svg{width:18px;height:18px;color:var(--accent)}
+
+/* ---------- numbers ---------- */
+.nums{display:grid;grid-template-columns:repeat(4,1fr);gap:0;margin-top:48px;border-top:.5px solid var(--hairline);border-bottom:.5px solid var(--hairline)}
+@media (max-width:860px){.nums{grid-template-columns:repeat(2,1fr)}}
+.num{padding:28px 20px 28px 0;border-right:.5px solid var(--hairline)}
+.num:last-child{border-right:0}
+@media (max-width:860px){.num:nth-child(2){border-right:0}.num:nth-child(3),.num:nth-child(4){border-top:.5px solid var(--hairline)}}
+.num b{display:block;font-family:var(--font-display);font-weight:800;font-size:clamp(40px,5vw,56px);line-height:1;letter-spacing:-.03em;font-variant-numeric:tabular-nums;font-variation-settings:"opsz" 96}
+.num b small{font-size:.45em;color:var(--faint);font-weight:600;margin-left:2px}
+.num .t{font-size:17px;font-weight:600;margin-top:12px}
+.num .s{font-size:15px;color:var(--dim);line-height:22px;margin-top:4px}
+
+/* ---------- pricing ---------- */
+.plans{display:grid;grid-template-columns:1fr 1.15fr;gap:16px;margin-top:48px;align-items:stretch}
+@media (max-width:760px){.plans{grid-template-columns:1fr}}
+.plan{position:relative;padding:28px;border-radius:var(--r-sheet);background:var(--surface);border:.5px solid var(--hairline);display:grid;grid-template-rows:auto auto 1fr auto;gap:0}
+.plan.hi{background:linear-gradient(180deg,rgba(59,224,200,.10),transparent 60%),var(--surface);border-color:rgba(59,224,200,.35);box-shadow:var(--shadow-2)}
+.plan .name{font-size:15px;font-weight:600;color:var(--dim)}
+.plan .price{margin-top:12px;display:flex;align-items:baseline;gap:8px}
+.plan .price b{font-family:var(--font-display);font-weight:800;font-size:56px;line-height:1;letter-spacing:-.04em;font-variation-settings:"opsz" 96;font-variant-numeric:tabular-nums}
+.plan .price span{color:var(--dim);font-size:15px}
+.plan ul{margin:24px 0 28px;padding:0;list-style:none;display:grid;gap:10px}
+.plan li{display:flex;gap:10px;font-size:15px;line-height:21px;color:var(--dim)}
+.plan li svg{width:18px;height:18px;flex:none;color:var(--accent);margin-top:1px}
+.plan li.no svg{color:var(--faint)}
+.plan li.no{color:var(--faint)}
+.plan .btn{width:100%}
+.plan .fine{margin-top:12px;font-size:12.5px;color:var(--faint);text-align:center;line-height:17px}
+.sticker{position:absolute;top:-14px;right:22px;padding:6px 12px;border-radius:var(--r-pill);background:var(--accent);color:var(--accent-ink);font-size:13px;font-weight:600;transform:rotate(2deg);box-shadow:var(--shadow-1)}
+.postit{position:absolute;right:-14px;bottom:-52px;transform:rotate(-3deg);padding:12px 16px 14px;background:#F3E9C8;color:#2b2410;border-radius:4px;box-shadow:0 8px 24px rgba(0,0,0,.4);font-family:var(--font-hand);font-size:21px;line-height:1.1;max-width:210px;opacity:0;transition:opacity .3s var(--ease),transform .4s var(--spring);pointer-events:none}
+.postit.show{opacity:1;transform:rotate(-3deg) translateY(-6px)}
+.postit::before{content:"";position:absolute;top:-8px;left:50%;width:56px;height:16px;margin-left:-28px;background:rgba(255,255,255,.35);transform:rotate(-2deg)}
+
+/* ---------- faq ---------- */
+.faq{max-width:760px;margin:40px auto 0;display:grid;gap:8px}
+.faq details{background:var(--surface);border:.5px solid var(--hairline-2);border-radius:var(--r);overflow:hidden}
+.faq summary{list-style:none;cursor:pointer;padding:18px 20px;display:flex;justify-content:space-between;align-items:center;gap:16px;font-weight:600;font-size:17px;line-height:24px}
+.faq summary::-webkit-details-marker{display:none}
+.faq summary svg{width:18px;height:18px;flex:none;color:var(--faint);transition:transform .3s var(--ease)}
+.faq details[open] summary svg{transform:rotate(45deg)}
+.faq .a{padding:0 20px 20px;color:var(--dim);font-size:15px;line-height:23px;max-width:62ch}
+.faq details::details-content{block-size:0;overflow:hidden;transition:block-size .35s var(--ease),content-visibility .35s allow-discrete}
+.faq details[open]::details-content{block-size:auto}
+
+/* ---------- close ---------- */
+.close{text-align:center;padding-block:clamp(72px,10vw,128px)}
+.close h2{font-size:clamp(36px,6vw,64px)}
+.close .btn-row{justify-content:center;margin-top:32px}
+footer{border-top:.5px solid var(--hairline);padding:40px 0 calc(40px + env(safe-area-inset-bottom,0px))}
+footer .row{display:flex;justify-content:space-between;gap:24px;flex-wrap:wrap;align-items:flex-start}
+footer .brand{display:flex;align-items:center;gap:10px;font-family:var(--font-display);font-weight:700;font-size:18px}
+footer .brand img{width:32px;height:32px;border-radius:9px}
+footer nav{display:flex;gap:18px;flex-wrap:wrap;font-size:15px;color:var(--dim)}
+footer nav a:hover{color:var(--text)}
+footer .made{margin-top:24px;font-size:13.5px;color:var(--faint);line-height:20px;max-width:56ch}
+
+/* ---------- reveals ---------- */
+@media (prefers-reduced-motion:no-preference){
+  @supports ((animation-timeline:view()) and (animation-range:entry)){
+    .reveal{animation:reveal auto linear both;animation-timeline:view();animation-range:entry 0% entry 42%}
+    @keyframes reveal{from{opacity:.001;transform:translateY(28px)}to{opacity:1;transform:none}}
+  }
+  @supports not ((animation-timeline:view()) and (animation-range:entry)){
+    .reveal{transition:opacity .7s var(--ease),transform .7s var(--ease)}
+    .reveal.pre{opacity:.001;transform:translateY(28px)}
+  }
+  .ripple{position:absolute;border-radius:50%;border:2px solid var(--accent);pointer-events:none;animation:ripple .9s var(--ease-out) forwards}
+  @keyframes ripple{from{transform:scale(.2);opacity:.9}to{transform:scale(2.6);opacity:0}}
+}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important;scroll-behavior:auto!important}
+}
+.toast{position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom,0px));transform:translate(-50%,20px);z-index:60;padding:12px 18px;border-radius:var(--r-pill);background:var(--floating);border:.5px solid var(--hairline);box-shadow:var(--shadow-2);font-size:15px;opacity:0;transition:opacity .3s var(--ease),transform .3s var(--ease);pointer-events:none;max-width:calc(100vw - 32px);text-align:center}
+.toast.show{opacity:1;transform:translate(-50%,0)}
+</style>
+</head>
+<body>
+
+<div class="nav-wrap">
+  <nav class="nav" aria-label="Main">
+    <a class="brand" href="#top"><img src="data:image/webp;base64,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" alt="" width="28" height="28">Cloak</a>
+    <a class="item" href="#how">How it works</a>
+    <a class="item" href="#features">Features</a>
+    <a class="item" href="#pricing">Pricing</a>
+    <a class="item" href="#faq">FAQ</a>
+    <a class="btn btn-primary btn-sm cta" href="#pricing">Get Cloak</a>
+  </nav>
+</div>
+
+<main id="top">
+
+<section class="hero">
+  <div class="hero-bg" aria-hidden="true"><canvas id="bgmap"></canvas></div>
+  <div class="wrap hero-grid">
+    <div>
+      <h1>
+        <span class="line rise">Put your iPhone</span>
+        <span class="line rise">somewhere <em>it isn't.</em></span>
+      </h1>
+      <p class="lede rise">Cloak changes the location every app on your phone reads. Pick a spot, tap once, and it drives there like a person would instead of jumping. No jailbreak. No computer after the first install.</p>
+      <div class="btn-row rise">
+        <a class="btn btn-primary" href="downloads/CloakInstaller-macos.dmg" data-dl="mac">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16.4 12.7c0-2.5 2-3.7 2.1-3.8-1.2-1.7-3-1.9-3.6-1.9-1.5-.2-3 .9-3.8.9-.8 0-2-.9-3.3-.9-1.7 0-3.3 1-4.1 2.5-1.8 3.1-.5 7.6 1.3 10.1.9 1.2 1.9 2.6 3.2 2.5 1.3-.1 1.8-.8 3.3-.8 1.6 0 2 .8 3.3.8 1.4 0 2.3-1.2 3.1-2.5 1-1.4 1.4-2.8 1.4-2.9-.1 0-2.9-1.1-2.9-4zM14 5.3c.7-.8 1.2-2 1-3.2-1 0-2.2.7-2.9 1.5-.6.7-1.2 1.9-1.1 3.1 1.1.1 2.3-.6 3-1.4z"/></svg>
+          Download for Mac
+        </a>
+        <a class="btn btn-ghost" href="downloads/CloakInstaller-windows.zip" data-dl="win">Windows</a>
+        <span class="btn-note">Your first 10 minutes are free. No card, no account.</span>
+      </div>
+      <ul class="pill-list rise">
+        <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>Works in every app</li>
+        <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>iOS 17 through 27</li>
+        <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>$39.99 once, forever</li>
+      </ul>
+    </div>
+
+    <div class="phone-wrap">
+      <div class="note n1" aria-hidden="true">
+        <span class="hand">tap this</span>
+        <svg viewBox="0 0 80 60" style="margin-left:auto"><path d="M6 6c18 4 40 10 62 46"/><path d="M58 40l10 12 4-15"/></svg>
+      </div>
+      <div class="phone" id="phone">
+        <div class="screen">
+          <div class="island"></div>
+          <div class="clock" id="clock">9:41</div>
+          <div class="status" aria-hidden="true"><i style="height:5px"></i><i style="height:8px"></i><i style="height:11px"></i><i style="height:14px"></i></div>
+          <canvas class="map" id="map" aria-label="Map demo"></canvas>
+          <div class="topchip" id="topchip">
+            <span class="dot"></span>
+            <div><div class="t" id="chip-t">Not simulating</div><div class="s" id="chip-s">Apps see your real location</div></div>
+          </div>
+          <div class="side" aria-hidden="true">
+            <span><svg viewBox="0 0 24 24" fill="currentColor"><path d="M21 3 3 10.5l8 2.5 2.5 8z"/></svg></span>
+            <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></span>
+          </div>
+          <div class="sheet">
+            <div class="grab"></div>
+            <div class="tabs" role="tablist">
+              <button role="tab" aria-selected="true" data-tab="places">Places</button>
+              <button role="tab" aria-selected="false" data-tab="route">Route</button>
+              <button role="tab" aria-selected="false" data-tab="drive">Drive</button>
+            </div>
+            <div id="pane-places">
+              <div class="search">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+                <span class="q" id="q">Shibuya, Tokyo</span><span class="caret"></span>
+              </div>
+              <div class="place">
+                <div class="row"><span id="place-name">Shibuya Crossing</span><span class="mono" id="place-ll">35.65950, 139.70050</span></div>
+                <button class="teleport" id="teleport">Teleport here<span class="bar"></span></button>
+              </div>
+            </div>
+            <div id="pane-drive" hidden>
+              <div class="drive">
+                <div>
+                  <div class="t" id="drive-t">Drive to Stop 2</div>
+                  <div class="s" id="drive-s">28 mph, limit 30, 1.4 mi left</div>
+                  <div class="prog"><i id="drive-prog"></i></div>
+                </div>
+                <div class="speedo" id="speedo" style="--v:0%"><b><span id="spd">0</span><small>mph</small></b></div>
+              </div>
+            </div>
+            <div id="pane-route" hidden>
+              <div class="drive">
+                <div>
+                  <div class="t">3 stops, 4.2 mi</div>
+                  <div class="s">Real roads. Stops at lights and stop signs. Speed follows the limit.</div>
+                  <div class="prog"><i style="width:100%;background:var(--floating)"></i></div>
+                </div>
+                <div class="speedo" style="--v:100%"><b><span>A</span><small>grade</small></b></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="note n2" aria-hidden="true">
+        <span class="hand">it actually drives,<br>no jumping</span>
+        <svg viewBox="0 0 80 60"><path d="M72 6C60 14 40 28 10 50"/><path d="M8 36l2 16 15-3"/></svg>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="marquee-sec">
+  <div class="wrap marquee-head">
+    <h2 style="font-size:clamp(24px,3vw,32px)">Every app reads the same location.</h2>
+    <p class="small">Cloak sets it at the system level, so there is nothing per app to configure. It also keeps a list of what each one checks.</p>
+  </div>
+  <div class="marquee"><div class="track" id="track1"></div></div>
+  <div class="marquee rev"><div class="track" id="track2"></div></div>
+  <div class="wrap"><p class="cap" style="margin-top:14px">Green: covered by the current setup. Amber: this app can read the flag iOS puts on simulated fixes, and Cloak tells you so instead of pretending.</p></div>
+</section>
+
+<section id="how">
+  <div class="wrap">
+    <div class="center reveal">
+      <h2>Install once. Then it's just your iPhone.</h2>
+      <p class="lede" style="margin-top:16px">The installer signs Cloak with your own Apple ID, the same way Xcode puts an app on a developer's phone. After that the computer can stay home.</p>
+    </div>
+    <div class="steps">
+      <div class="step">
+        <div class="k">1</div>
+        <h3>Plug in, once</h3>
+        <p>Open Cloak Installer on a Mac, Windows PC or Linux box. It turns on Developer Mode, signs the app, installs it and tells iOS to trust it. About four minutes.</p>
+        <div class="art">
+          <svg viewBox="0 0 300 110" aria-hidden="true">
+            <rect x="22" y="28" width="96" height="60" rx="8" fill="#29323B"/><rect x="30" y="36" width="80" height="40" rx="3" fill="#0C1015"/>
+            <rect x="14" y="88" width="112" height="6" rx="3" fill="#3A444E"/>
+            <rect x="222" y="18" width="46" height="84" rx="10" fill="#29323B"/><rect x="228" y="26" width="34" height="68" rx="6" fill="#0C1015"/>
+            <path id="cable" d="M118 62 C160 62 180 60 222 60" stroke="#3BE0C8" stroke-width="3" fill="none" stroke-linecap="round" stroke-dasharray="6 8"><animate attributeName="stroke-dashoffset" from="28" to="0" dur="1s" repeatCount="indefinite"/></path>
+            <circle cx="245" cy="60" r="7" fill="#3BE0C8" opacity=".9"><animate attributeName="r" values="5;8;5" dur="1.6s" repeatCount="indefinite"/></circle>
+          </svg>
+        </div>
+      </div>
+      <div class="step">
+        <div class="k">2</div>
+        <h3>Pick a spot</h3>
+        <p>Search, paste coordinates, or drop a pin. Teleport, or build a route with real stops and let it drive. Save the places you keep going back to.</p>
+        <div class="art">
+          <svg viewBox="0 0 300 110" aria-hidden="true">
+            <g stroke="#2A3440" stroke-width="6" stroke-linecap="round"><path d="M0 40H300M0 80H300M60 0V110M140 0V110M230 0V110"/></g>
+            <path d="M60 80 L140 80 L140 40 L230 40" stroke="#3BE0C8" stroke-width="3" fill="none" stroke-linecap="round" stroke-dasharray="260" stroke-dashoffset="260"><animate attributeName="stroke-dashoffset" from="260" to="0" dur="2.4s" repeatCount="indefinite"/></path>
+            <circle cx="60" cy="80" r="6" fill="#3BE0C8"/><circle cx="230" cy="40" r="6" fill="#FBB353"/>
+            <path d="M230 24c-6 0-10 4-10 9 0 7 10 15 10 15s10-8 10-15c0-5-4-9-10-9z" fill="#FBB353"><animateTransform attributeName="transform" type="translate" values="0 0;0 -4;0 0" dur="1.4s" repeatCount="indefinite"/></path>
+          </svg>
+        </div>
+      </div>
+      <div class="step">
+        <div class="k">3</div>
+        <h3>Leave the computer behind</h3>
+        <p>Cloak keeps working from the phone alone, over Wi-Fi or cellular. When Apple's 7-day signing window runs out, it renews itself from inside the app.</p>
+        <div class="art">
+          <svg viewBox="0 0 300 110" aria-hidden="true">
+            <rect x="127" y="14" width="46" height="84" rx="10" fill="#29323B"/><rect x="133" y="22" width="34" height="68" rx="6" fill="#0C1015"/>
+            <g fill="none" stroke="#3BE0C8" stroke-width="2.5" stroke-linecap="round" opacity=".9">
+              <path d="M96 56a54 54 0 0 1 0 0"/>
+              <path d="M104 40a40 40 0 0 0 0 32"><animate attributeName="opacity" values=".2;1;.2" dur="1.8s" repeatCount="indefinite"/></path>
+              <path d="M88 28a62 62 0 0 0 0 56"><animate attributeName="opacity" values=".2;1;.2" dur="1.8s" begin=".3s" repeatCount="indefinite"/></path>
+              <path d="M196 40a40 40 0 0 1 0 32"><animate attributeName="opacity" values=".2;1;.2" dur="1.8s" repeatCount="indefinite"/></path>
+              <path d="M212 28a62 62 0 0 1 0 56"><animate attributeName="opacity" values=".2;1;.2" dur="1.8s" begin=".3s" repeatCount="indefinite"/></path>
+            </g>
+            <circle cx="150" cy="56" r="5" fill="#3BE0C8"/>
+          </svg>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="features" style="padding-top:0">
+  <div class="wrap stack" style="gap:clamp(72px,10vw,128px)">
+
+    <div class="beat">
+      <div class="copy reveal">
+        <span class="eyebrow">Journey</span>
+        <h2>It drives there. It doesn't jump.</h2>
+        <p class="lede">A teleport is the loudest tell in any location history: one second you're in Dallas, the next you're in Tokyo. Cloak plans a trip instead. Drive to a real airport, sit at the gate, fly, land, drive to the pin.</p>
+        <ul>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg><span><b>Real roads, real limits.</b> Routes follow the street, slow for corners and stop at lights and stop signs, with the odds a real driver would.</span></li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg><span><b>Flights hold at the gate.</b> A phone in airplane mode reports nothing, so the last fix is the departure gate and the next is arrivals. Exactly what a real trip looks like.</span></li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg><span><b>Standing still looks like standing still.</b> Idle GPS wanders the way real GPS wanders, not in a neat little box.</span></li>
+        </ul>
+      </div>
+      <div class="demo reveal">
+        <div class="bar">
+          <span class="t">What your location history looks like</span>
+          <div class="seg" role="group" aria-label="Compare">
+            <button aria-pressed="true" data-mode="jump">Any other app</button>
+            <button aria-pressed="false" data-mode="journey">Cloak</button>
+          </div>
+        </div>
+        <div class="jmap" id="jmap">
+          <svg viewBox="0 0 480 330" aria-hidden="true">
+            <defs><pattern id="gridp" width="30" height="30" patternUnits="userSpaceOnUse"><path d="M30 0H0V30" fill="none" stroke="#1B232C" stroke-width="1"/></pattern></defs>
+            <rect width="480" height="330" fill="url(#gridp)"/>
+            <path d="M0 250 C90 230 130 300 200 280 S320 210 480 240" fill="none" stroke="#1F2A34" stroke-width="18" stroke-linecap="round"/>
+            <path d="M40 40 C120 90 200 60 300 120 S420 200 470 90" fill="none" stroke="#1F2A34" stroke-width="10" stroke-linecap="round"/>
+            <g id="j-jump"><path id="jumpline" d="M70 250 L410 80" fill="none" stroke="#FF6B6F" stroke-width="2.5" stroke-dasharray="6 6"/></g>
+            <g id="j-journey" opacity="0">
+              <path id="leg1" d="M70 250 C110 245 130 215 160 210" fill="none" stroke="#3BE0C8" stroke-width="3" stroke-linecap="round"/>
+              <path id="leg2" d="M160 210 C230 160 300 130 340 110" fill="none" stroke="#3BE0C8" stroke-width="2" stroke-dasharray="3 7" stroke-linecap="round" opacity=".7"/>
+              <path id="leg3" d="M340 110 C360 95 385 90 410 80" fill="none" stroke="#3BE0C8" stroke-width="3" stroke-linecap="round"/>
+              <g fill="#A9B3BD"><path d="M152 200l6-14 6 14-6-3z" transform="rotate(-30 158 200)"/><path d="M332 100l6-14 6 14-6-3z" transform="rotate(-30 338 100)"/></g>
+            </g>
+            <circle cx="70" cy="250" r="6" fill="#A9B3BD"/>
+            <circle cx="410" cy="80" r="6" fill="#3BE0C8"/>
+            <circle id="jdot" cx="70" cy="250" r="7" fill="#3BE0C8" stroke="#fff" stroke-width="2"/>
+          </svg>
+          <div class="tag" style="left:10px;bottom:12px"><span>Home</span><small>Dallas, TX</small></div>
+          <div class="tag" style="right:10px;top:12px"><span>Pin</span><small>Shibuya, Tokyo</small></div>
+          <div class="tag bad" id="tag-jump" style="left:38%;top:44%"><span>6,400 mi in 0 s</span><small>flagged</small></div>
+          <div class="tag good" id="tag-j1" style="left:26%;top:52%" hidden><span>DFW</span><small>82 min at the gate</small></div>
+          <div class="tag good" id="tag-j2" style="left:60%;top:20%" hidden><span>HND</span><small>zero drift in flight</small></div>
+        </div>
+        <div class="jlog" id="jlog"></div>
+      </div>
+    </div>
+
+    <div class="beat flip">
+      <div class="copy reveal">
+        <span class="eyebrow">Exposure</span>
+        <h2>The apps you're hiding from don't only read GPS.</h2>
+        <p class="lede">They check where your connection comes out, what time zone the phone is in, whether the motion sensors agree you're moving. Cloak grades the room your pin is standing in, names the exact fix, and pauses if your cover breaks mid-drive.</p>
+        <ul>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg><span><b>Tells you which VPN server to pick</b> and opens the VPN app you already have. Cloak never routes your traffic itself.</span></li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg><span><b>Auto-pauses when the VPN drops.</b> Find out from Cloak, not from the app you were hiding from.</span></li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg><span><b>Honest about the one thing nobody can hide.</b> iOS marks simulated fixes. A few apps read that flag. Cloak says which ones, plainly, in the app.</span></li>
+        </ul>
+      </div>
+      <div class="demo reveal">
+        <div class="score">
+          <div class="ring" id="ring" style="--v:41%;--c:var(--danger)"><b id="ring-n">41</b></div>
+          <div><div class="t" id="score-t">Cover is blown</div><div class="s" id="score-s">2 things to close before you start. Tap a switch to see the fix.</div></div>
+        </div>
+        <div class="leaks" id="leaks">
+          <div class="leak" data-state="bad" data-key="ip">
+            <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></span>
+            <div><div class="t">Connection comes out 6,400 mi from the pin</div><div class="s" data-bad="Your IP geolocates to Dallas. The pin is in Tokyo." data-ok="Your IP geolocates to Tokyo. Matches the pin.">Your IP geolocates to Dallas. The pin is in Tokyo.</div></div>
+            <span class="fix">Set your VPN to Tokyo, Japan</span>
+          </div>
+          <div class="leak" data-state="bad" data-key="tz">
+            <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></span>
+            <div><div class="t">Time zone is 14 hours off</div><div class="s" data-bad="Phone says Central. Tokyo is JST. Any app can read this with no permission." data-ok="Phone says JST. Matches the pin.">Phone says Central. Tokyo is JST. Any app can read this with no permission.</div></div>
+            <span class="fix">Settings, then Date &amp; Time</span>
+          </div>
+          <div class="leak" data-state="ok" data-key="motion">
+            <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>
+            <div><div class="t">Motion agrees with speed</div><div class="s" data-bad="Simulating 28 mph while the phone sits on a desk. Telematics SDKs notice." data-ok="Phone is still and the pin is still. Nothing to read.">Phone is still and the pin is still. Nothing to read.</div></div>
+            <span class="fix"></span>
+          </div>
+          <div class="leak" data-state="note" data-key="flag">
+            <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M12 7v6M12 17v.5"/></svg></span>
+            <div><div class="t">iOS marks the fix as simulated</div><div class="s">Nothing closes this one. It is the same for every app in this category. Cloak lists the 19 apps it knows read it.</div></div>
+            <span class="fix">permanent</span>
+          </div>
+        </div>
+        <div class="toggles">
+          <div class="toggle"><span>VPN set to Tokyo<small>Cloak opens the VPN app for you</small></span><button class="sw" role="switch" aria-checked="false" data-key="ip" aria-label="VPN set to Tokyo"></button></div>
+          <div class="toggle"><span>Time zone matched<small>One toggle in Settings</small></span><button class="sw" role="switch" aria-checked="false" data-key="tz" aria-label="Time zone matched"></button></div>
+          <div class="toggle"><span>Simulating a drive on a desk<small>What a telematics app would catch</small></span><button class="sw" role="switch" aria-checked="false" data-key="motion" aria-label="Simulating a drive while still"></button></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="beat">
+      <div class="copy reveal">
+        <span class="eyebrow">Rehearse</span>
+        <h2>It grades the drive before a single fix goes out.</h2>
+        <p class="lede">Every other tool makes you run it live and hope. Cloak runs your planned route through the same motion engine offline, in an instant, and marks the single weakest second: a speed step between two fixes, or a heading that disagrees with the road.</p>
+        <ul>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg><span><b>Believability score</b> for the trace: shape, speed, jitter, acceleration.</span></li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg><span><b>Replay with variation.</b> The same commute never plays back identical twice.</span></li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg><span><b>What it grades is exactly what it sends.</b> Same engine, same code path.</span></li>
+        </ul>
+      </div>
+      <div class="demo reveal">
+        <div class="bar"><span class="t">Speed along the planned drive</span><span class="cap mono" id="trace-len">4.2 mi, 11 min</span></div>
+        <div class="trace" id="trace">
+          <span class="lbl">mph</span>
+          <svg viewBox="0 0 480 240" preserveAspectRatio="none" aria-hidden="true">
+            <g stroke="#1B232C" stroke-width="1"><path d="M0 60H480M0 120H480M0 180H480"/></g>
+            <path id="limit" fill="none" stroke="#3A444E" stroke-width="2" stroke-dasharray="4 6"/>
+            <path id="speed-fill" fill="rgba(59,224,200,.10)"/>
+            <path id="speed" fill="none" stroke="#3BE0C8" stroke-width="2.5" stroke-linejoin="round"/>
+            <g id="stops"></g>
+            <g id="weak"><circle r="7" fill="none" stroke="#FBB353" stroke-width="2"><animate attributeName="r" values="6;10;6" dur="1.6s" repeatCount="indefinite"/></circle><circle r="3" fill="#FBB353"/></g>
+          </svg>
+        </div>
+        <div class="legend"><span><i style="background:#3BE0C8"></i>planned speed</span><span><i style="background:#3A444E"></i>posted limit</span><span><i style="background:#FBB353;width:8px;height:8px;border-radius:50%"></i>weakest second</span></div>
+        <div class="slider">
+          <label for="persona">Driver persona</label>
+          <input id="persona" type="range" min="0" max="100" value="35">
+          <div class="lbls"><span>Cautious</span><span>Average</span><span>Late for work</span></div>
+        </div>
+        <div class="verdict"><span class="g" id="grade">A-</span><div><span id="grade-t">Passes. Weakest second is the brake into Stop 2.</span><small id="grade-s">4 mph step between neighbouring fixes. A real driver does that too.</small></div></div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<section style="padding-top:0">
+  <div class="wrap">
+    <div class="center reveal">
+      <h2>The rest of it.</h2>
+      <p class="lede" style="margin-top:16px">Everything here is in the one licence. There are no tiers.</p>
+    </div>
+    <div class="grid3">
+      <div class="cell"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17c4-8 8 8 12 0s6-4 6-4"/><circle cx="3" cy="17" r="1.5"/><circle cx="21" cy="13" r="1.5"/></svg></div><h3>Routes with real stops</h3><p>Multi-stop drives on real roads. Speed follows the posted limit, corners slow you down, and lights stop you with the odds a real light would.</p></div>
+      <div class="cell"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div><h3>Routines</h3><p>The Tuesday commute, the Saturday gym. Schedule a drive to run on its own, and vary a little each time so it never looks copied.</p></div>
+      <div class="cell"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="8" width="18" height="8" rx="4"/><circle cx="8" cy="12" r="1.5" fill="currentColor"/></svg></div><h3>Dynamic Island, Live Activity</h3><p>Pause, stop, or hit the panic button from the lock screen. You don't have to open the app to get back to your real spot.</p></div>
+      <div class="cell"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h6l2-5 3 10 2-5h3"/></svg></div><h3>Shortcuts and App Intents</h3><p>"Hey Siri, cloak me at home." Start, stop and teleport from Shortcuts, automations, or the Action button.</p></div>
+      <div class="cell"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></div><h3>Real-location peek</h3><p>Hold to see where you really are, without stopping the simulation. Handy for meeting someone in the real world.</p></div>
+      <div class="cell"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 7v5c0 5 3.5 8.5 8 9 4.5-.5 8-4 8-9V7z"/></svg></div><h3>Geofence guard</h3><p>Draw a fence around the place you're pretending to be. Cloak refuses to wander out of it, even on a bad route.</p></div>
+      <div class="cell"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12a7 7 0 0 1 12-5l2 2M19 12a7 7 0 0 1-12 5l-2-2"/><path d="M19 4v5h-5M5 20v-5h5"/></svg></div><h3>Renews itself</h3><p>Apple signs a sideloaded app for 7 days on a free Apple ID. Cloak re-signs from inside the app. You never plug back in for it.</p></div>
+      <div class="cell"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18h2M8 18h2M12 18h2M16 18h4M6 14V8M10 14V4M14 14V10M18 14V6"/></svg></div><h3>Works on cellular</h3><p>One Shortcut, set up once, keeps the link alive when you leave Wi-Fi. Cloak tells you the moment it's needed and not before.</p></div>
+      <div class="cell"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.9 2.5 17.5A2 2 0 0 0 4.2 20.5h15.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg></div><h3>Panic restore</h3><p>One button, anywhere, and your real GPS is back instantly. Also on the lock screen, also in Shortcuts.</p></div>
+    </div>
+  </div>
+</section>
+
+<section style="padding-top:0">
+  <div class="wrap">
+    <div class="center reveal">
+      <h2>Your iPhone doesn't change.</h2>
+      <p class="lede" style="margin-top:16px">Cloak uses the location simulator Apple ships inside iOS for developers, and leaves when you tell it to.</p>
+    </div>
+    <div class="trust">
+      <div class="cell"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>No jailbreak, ever</h3><p>iOS stays stock. Cloak never modifies the system. It talks to the developer location pathway Apple already ships, over the same tunnel Xcode uses.</p></div>
+      <div class="cell"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>Your places stay on your phone</h3><p>Pins, routes and history are never sent anywhere. The only thing Cloak's server ever sees is your licence key and the device it's on.</p></div>
+      <div class="cell"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>Fully reversible</h3><p>Stop, and your real GPS takes over at once. Delete Cloak like any other app and nothing is left behind, not even a profile.</p></div>
+    </div>
+  </div>
+</section>
+
+<section style="padding-top:0">
+  <div class="wrap">
+    <div class="center reveal"><h2>Honest numbers.</h2></div>
+    <div class="nums">
+      <div class="num"><b>10<small>min</small></b><div class="t">Free before you pay</div><div class="s">Download, install, teleport. Decide after.</div></div>
+      <div class="num"><b>1</b><div class="t">Phone per licence</div><div class="s">Move it to a new phone yourself, from Settings. No emailing anyone.</div></div>
+      <div class="num"><b>14<small>days</small></b><div class="t">Offline grace</div><div class="s">If my server is down, your app is not. It keeps working for two weeks without checking in.</div></div>
+      <div class="num"><b>0</b><div class="t">Coordinates logged</div><div class="s">Not on the phone's network, not on my server. There is nothing to leak.</div></div>
+    </div>
+  </div>
+</section>
+
+<section id="pricing" style="padding-top:0">
+  <div class="wrap">
+    <div class="center reveal">
+      <h2>One price. No subscription.</h2>
+      <p class="lede" style="margin-top:16px">Pay once, own it, get every update. If a subscription is what you want, the other apps will happily sell you one.</p>
+    </div>
+    <div class="plans">
+      <div class="plan">
+        <div class="name">Try it</div>
+        <div class="price"><b>$0</b><span>10 minutes, no card</span></div>
+        <ul>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>Full install on your own phone</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>Teleport anywhere</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>See the Exposure grade for your setup</li>
+          <li class="no"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 12h12"/></svg>Routes, drives, journeys, routines</li>
+        </ul>
+        <div>
+          <a class="btn btn-ghost" href="downloads/CloakInstaller-macos.dmg" data-dl="mac">Download the installer</a>
+          <p class="fine">Mac, Windows, Linux. About 4 minutes with a cable.</p>
+        </div>
+      </div>
+      <div class="plan hi">
+        <span class="sticker">Lifetime</span>
+        <div class="name">Cloak</div>
+        <div class="price"><b>$39.99</b><span>once, forever</span></div>
+        <ul>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>Everything on this page, no tiers</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>Routes, drives, journeys, routines, rehearse</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>Every update, for as long as I make them</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>One phone at a time, move it whenever</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>Email goes to a person, and it's me</li>
+        </ul>
+        <div>
+          <button class="btn btn-primary" id="buy" type="button">Buy Cloak, $39.99</button>
+          <p class="fine">Licence key arrives by email. Paste it into the app once.</p>
+        </div>
+        <div class="postit" id="postit" aria-live="polite">checkout opens soon.<br>the app is real, the cart isn't yet</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="faq" style="padding-top:0">
+  <div class="wrap">
+    <div class="center reveal"><h2>Questions people actually ask.</h2></div>
+    <div class="faq">
+      <details><summary>Do I need a computer?<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></summary><div class="a">Once, to install it. After that Cloak runs from the phone alone and re-signs itself when Apple's window runs out. You could throw the computer away, though I'd rather you didn't.</div></details>
+      <details><summary>Why does the installer ask for my Apple ID?<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></summary><div class="a">Apple only lets an app onto a phone if it's signed by an Apple ID, and it has to be yours. The sign-in goes from your computer straight to Apple. It never touches my server. You can remove the saved account from the app any time.</div></details>
+      <details><summary>Does it need a jailbreak?<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></summary><div class="a">No. Cloak uses the location simulator that's already inside iOS for developers. Your phone stays completely stock, and stopping the simulation puts your real GPS back at once.</div></details>
+      <details><summary>Will the app I'm using notice?<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></summary><div class="a">Mostly no, and Cloak works harder than anything else at that: real drives instead of jumps, GPS noise that behaves like real GPS, and an Exposure grade that catches the non-GPS tells (your IP, your time zone, your motion sensors). One thing no tool can hide: iOS marks a simulated fix as simulated. A handful of apps read that. Cloak lists them in the app rather than pretending.</div></details>
+      <details><summary>Which iPhones and iOS versions?<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></summary><div class="a">Any iPhone or iPad that runs iOS 17 or later, including the iOS 26 and 27 betas. I run the beta myself, so it gets tested there first.</div></details>
+      <details><summary>Does it work on cellular, away from Wi-Fi?<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></summary><div class="a">Yes. The link Cloak uses prefers Wi-Fi, so leaving it needs a one-time Shortcut to relink over cellular. Cloak shows you exactly when to set it up and walks you through it. After that it's automatic.</div></details>
+      <details><summary>What happens if your server goes down?<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></summary><div class="a">Nothing you'd notice for two weeks. Your licence is a signed token the phone checks by itself, with 14 days of grace. Being offline is not a refusal.</div></details>
+      <details><summary>Can I move it to a new phone?<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></summary><div class="a">Yes. One phone at a time per licence. Release it from Settings in the app, install on the new phone, paste the same key.</div></details>
+      <details><summary>Is it on the App Store?<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></summary><div class="a">No, and it can't be. A location simulator would never pass review. That's why the installer exists, and why updates come from inside the app instead.</div></details>
+    </div>
+  </div>
+</section>
+
+<section class="close reveal">
+  <div class="wrap">
+    <h2>Be somewhere else<br>by the time you close this tab.</h2>
+    <p class="lede" style="margin:20px auto 0">Install it once from your computer. Then leave the computer behind.</p>
+    <div class="btn-row">
+      <a class="btn btn-primary" href="downloads/CloakInstaller-macos.dmg" data-dl="mac">Download for Mac</a>
+      <a class="btn btn-ghost" href="#pricing">Buy Cloak, $39.99</a>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="row">
+      <div class="brand"><img src="data:image/webp;base64,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" alt="" width="32" height="32">Cloak <span class="cap mono" style="margin-left:6px">v1.6.8</span></div>
+      <nav aria-label="Footer"><a href="#how">How it works</a><a href="#features">Features</a><a href="#pricing">Pricing</a><a href="#faq">FAQ</a><a href="mailto:hello@example.com" data-mail>Email me</a></nav>
+    </div>
+    <p class="made">Made by one person, not a company. If something breaks, the email above reaches me, not a queue. Cloak is not affiliated with Apple. Some apps and games detect simulated location and may restrict accounts; that's on you to weigh.</p>
+  </div>
+</footer>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+(() => {
+const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const lerp = (a, b, t) => a + (b - a) * t;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const ease = t => 1 - Math.pow(1 - t, 3);
+
+function rng(seed) {
+  let s = seed >>> 0 || 1;
+  return () => { s ^= s << 13; s ^= s >>> 17; s ^= s << 5; return ((s >>> 0) % 10000) / 10000; };
+}
+
+function fitCanvas(c) {
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  const r = c.getBoundingClientRect();
+  const w = Math.max(1, Math.round(r.width)), h = Math.max(1, Math.round(r.height));
+  if (c.width !== w * dpr || c.height !== h * dpr) { c.width = w * dpr; c.height = h * dpr; }
+  const ctx = c.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { ctx, w, h };
+}
+
+const clock = $('#clock');
+function tickClock() {
+  const d = new Date();
+  let h = d.getHours() % 12 || 12;
+  clock.textContent = h + ':' + String(d.getMinutes()).padStart(2, '0');
+}
+tickClock(); setInterval(tickClock, 15000);
+
+/* ---------------- hero background ---------------- */
+{
+  const c = $('#bgmap');
+  let raf = 0, t0 = performance.now(), visible = true;
+  const routes = [];
+  function build(w, h) {
+    routes.length = 0;
+    const r = rng(7);
+    for (let i = 0; i < 3; i++) {
+      const pts = [];
+      let x = w * (0.55 + r() * 0.4), y = -20;
+      pts.push([x, y]);
+      while (y < h + 20) {
+        y += 60 + r() * 140;
+        if (r() > 0.5) x += (r() - 0.5) * 260;
+        pts.push([x, y]);
+        if (y < h + 20) { y += 40 + r() * 100; pts.push([x, y]); }
+      }
+      routes.push({ pts, off: r() * 1000, spd: 30 + r() * 30 });
+    }
+  }
+  function draw(now) {
+    const { ctx, w, h } = fitCanvas(c);
+    if (!routes.length || routes._w !== w) { build(w, h); routes._w = w; }
+    ctx.clearRect(0, 0, w, h);
+    ctx.strokeStyle = 'rgba(255,255,255,.035)';
+    ctx.lineWidth = 1;
+    const g = 88;
+    ctx.beginPath();
+    for (let x = (w % g) / 2; x < w; x += g) { ctx.moveTo(x, 0); ctx.lineTo(x, h); }
+    for (let y = 40; y < h; y += g) { ctx.moveTo(0, y); ctx.lineTo(w, y); }
+    ctx.stroke();
+    const t = (now - t0) / 1000;
+    for (const rt of routes) {
+      ctx.beginPath();
+      rt.pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
+      ctx.strokeStyle = 'rgba(59,224,200,.10)'; ctx.lineWidth = 2; ctx.setLineDash([]); ctx.stroke();
+      ctx.strokeStyle = 'rgba(59,224,200,.35)'; ctx.lineWidth = 2;
+      ctx.setLineDash([14, 220]); ctx.lineDashOffset = -(t * rt.spd + rt.off);
+      ctx.stroke(); ctx.setLineDash([]);
+    }
+    if (!reduce && visible) raf = requestAnimationFrame(draw);
+  }
+  new IntersectionObserver(([e]) => { visible = e.isIntersecting; if (visible && !raf) raf = requestAnimationFrame(draw); if (!visible) { cancelAnimationFrame(raf); raf = 0; } }).observe(c);
+  raf = requestAnimationFrame(draw);
+  addEventListener('resize', () => { routes.length = 0; if (reduce) draw(performance.now()); });
+}
+
+/* ---------------- phone demo ---------------- */
+{
+  const map = $('#map');
+  const cities = [
+    { q: 'Shibuya, Tokyo', name: 'Shibuya Crossing', ll: '35.65950, 139.70050', seed: 11, park: 1, streets: ['Meiji-dori', 'Dogenzaka', 'Koen-dori'] },
+    { q: 'Eiffel Tower', name: 'Champ de Mars', ll: '48.85840, 2.29450', seed: 23, park: 2, streets: ['Av. de Suffren', 'Quai Branly', 'Rue Cler'] },
+    { q: 'New York, NY', name: '826 Broadway', ll: '40.73710, -73.99170', seed: 37, park: 1, streets: ['Broadway', 'E 12th St', 'University Pl'] },
+    { q: 'Reykjavik', name: 'Hallgrimskirkja', ll: '64.14170, -21.92660', seed: 51, park: 1, streets: ['Skolavordustigur', 'Frakkastigur', 'Njalsgata'] },
+    { q: 'Sydney', name: 'Opera House', ll: '-33.85680, 151.21530', seed: 67, park: 2, streets: ['Macquarie St', 'Circular Quay E', 'Bridge St'] },
+    { q: 'Dallas, TX', name: 'Home', ll: '32.77670, -96.79700', seed: 5, park: 1, streets: ['Young St', 'Browder St', 'Evergreen St'] },
+  ];
+  let ci = 0, city = null, dot = { x: .5, y: .45 }, route = null, driving = null;
+  const chip = $('#topchip'), chipT = $('#chip-t'), chipS = $('#chip-s');
+  const tabs = $$('.tabs [role=tab]');
+  const panes = { places: $('#pane-places'), route: $('#pane-route'), drive: $('#pane-drive') };
+  function showTab(k) {
+    tabs.forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === k)));
+    for (const p in panes) panes[p].hidden = p !== k;
+  }
+  tabs.forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
+
+  function genCity(c) {
+    const r = rng(c.seed * 977 + 13);
+    const vs = [], hs = [];
+    let x = -0.1 + r() * 0.08; while (x < 1.1) { vs.push(x); x += 0.13 + r() * 0.16; }
+    let y = -0.1 + r() * 0.08; while (y < 1.1) { hs.push(y); y += 0.10 + r() * 0.14; }
+    const parks = [];
+    for (let i = 0; i < c.park; i++) {
+      const vi = 1 + Math.floor(r() * (vs.length - 3)), hi = 1 + Math.floor(r() * (hs.length - 3));
+      parks.push([vs[vi], hs[hi], vs[vi + 1], hs[hi + 1]]);
+    }
+    const wide = new Set([Math.floor(r() * vs.length), Math.floor(r() * hs.length) + 100]);
+    const labels = c.streets.map((s, i) => ({ s, x: vs[Math.min(vs.length - 1, 1 + i * 2)], y: hs[Math.min(hs.length - 1, 2 + i)] , vert: i === 0 }));
+    return { vs, hs, parks, wide, labels, r };
+  }
+
+  function drawCity(ctx, w, h, g, alpha = 1) {
+    ctx.save(); ctx.globalAlpha = alpha;
+    ctx.fillStyle = '#1B232C'; ctx.fillRect(0, 0, w, h);
+    for (const p of g.parks) {
+      ctx.fillStyle = '#173A35';
+      ctx.fillRect(p[0] * w + 4, p[1] * h + 4, (p[2] - p[0]) * w - 8, (p[3] - p[1]) * h - 8);
+    }
+    ctx.lineCap = 'round';
+    g.vs.forEach((x, i) => { ctx.strokeStyle = '#2A3440'; ctx.lineWidth = g.wide.has(i) ? 14 : 8; ctx.beginPath(); ctx.moveTo(x * w, -10); ctx.lineTo(x * w, h + 10); ctx.stroke(); });
+    g.hs.forEach((y, i) => { ctx.strokeStyle = '#2A3440'; ctx.lineWidth = g.wide.has(i + 100) ? 14 : 8; ctx.beginPath(); ctx.moveTo(-10, y * h); ctx.lineTo(w + 10, y * h); ctx.stroke(); });
+    ctx.fillStyle = 'rgba(255,255,255,.07)';
+    for (let i = 0; i < g.vs.length - 1; i++) for (let j = 0; j < g.hs.length - 1; j++) {
+      if (((i * 7 + j * 3) % 5) === 0) ctx.fillRect(g.vs[i] * w + 12, g.hs[j] * h + 12, (g.vs[i + 1] - g.vs[i]) * w - 24, (g.hs[j + 1] - g.hs[j]) * h - 24);
+    }
+    ctx.fillStyle = 'rgba(255,255,255,.28)'; ctx.font = '600 9px -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif';
+    for (const l of g.labels) {
+      ctx.save(); ctx.translate(l.x * w, l.y * h);
+      if (l.vert) ctx.rotate(-Math.PI / 2);
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(l.s.toUpperCase(), 0, 0); ctx.restore();
+    }
+    ctx.restore();
+  }
+
+  function makeRoute(g, start) {
+    const nearest = (arr, v) => arr.reduce((a, b) => Math.abs(b - v) < Math.abs(a - v) ? b : a);
+    const sx = nearest(g.vs, start.x), sy = nearest(g.hs, start.y);
+    const pick = (arr, v, dir) => { const c = arr.filter(a => dir > 0 ? a > v + 0.12 && a < 0.96 : a < v - 0.12 && a > 0.04); return c.length ? c[Math.floor(g.r() * c.length)] : v; };
+    const x2 = pick(g.vs, sx, g.r() > .5 ? 1 : -1), y2 = pick(g.hs, sy, g.r() > .5 ? 1 : -1);
+    const x3 = pick(g.vs, x2, x2 > sx ? 1 : -1);
+    return [[sx, sy], [x2, sy], [x2, y2], [x3, y2]];
+  }
+  function routeLen(pts) { let L = 0; for (let i = 1; i < pts.length; i++) L += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]); return L; }
+  function pointAt(pts, f) {
+    const L = routeLen(pts); let d = f * L;
+    for (let i = 1; i < pts.length; i++) {
+      const s = Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+      if (d <= s) { const t = s ? d / s : 0; return { x: lerp(pts[i - 1][0], pts[i][0], t), y: lerp(pts[i - 1][1], pts[i][1], t) }; }
+      d -= s;
+    }
+    const p = pts[pts.length - 1]; return { x: p[0], y: p[1] };
+  }
+
+  let prev = null, fade = 0, fadeT0 = 0;
+  function render(now) {
+    const { ctx, w, h } = fitCanvas(map);
+    if (prev && fade < 1) {
+      fade = clamp((now - fadeT0) / 450, 0, 1);
+      drawCity(ctx, w, h, prev, 1);
+      drawCity(ctx, w, h, city, ease(fade));
+    } else drawCity(ctx, w, h, city, 1);
+    if (route) {
+      ctx.strokeStyle = 'rgba(59,224,200,.9)'; ctx.lineWidth = 4; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+      ctx.beginPath(); route.forEach((p, i) => i ? ctx.lineTo(p[0] * w, p[1] * h) : ctx.moveTo(p[0] * w, p[1] * h)); ctx.stroke();
+      const e = route[route.length - 1];
+      ctx.fillStyle = '#FBB353'; ctx.beginPath(); ctx.arc(e[0] * w, e[1] * h, 6, 0, 7); ctx.fill();
+      ctx.fillStyle = 'rgba(0,0,0,.55)'; ctx.font = '600 10px -apple-system, BlinkMacSystemFont, Arial, sans-serif';
+      ctx.fillStyle = '#EEF2F5'; ctx.textAlign = 'center'; ctx.fillText('Stop 2', e[0] * w, e[1] * h - 12);
+    }
+    const dx = dot.x * w, dy = dot.y * h;
+    const grd = ctx.createRadialGradient(dx, dy, 4, dx, dy, 34);
+    grd.addColorStop(0, 'rgba(59,224,200,.35)'); grd.addColorStop(1, 'rgba(59,224,200,0)');
+    ctx.fillStyle = grd; ctx.beginPath(); ctx.arc(dx, dy, 34, 0, 7); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(dx, dy, 10, 0, 7); ctx.fill();
+    ctx.fillStyle = '#3BE0C8'; ctx.beginPath(); ctx.arc(dx, dy, 7.5, 0, 7); ctx.fill();
+    if (driving) {
+      ctx.save(); ctx.translate(dx, dy); ctx.rotate(driving.heading); ctx.fillStyle = '#06211D';
+      ctx.beginPath(); ctx.moveTo(4, 0); ctx.lineTo(-3, -3.2); ctx.lineTo(-1.5, 0); ctx.lineTo(-3, 3.2); ctx.closePath(); ctx.fill(); ctx.restore();
+    }
+    ctx.fillStyle = 'rgba(0,0,0,.5)'; ctx.font = '600 11px -apple-system, BlinkMacSystemFont, Arial, sans-serif'; ctx.textAlign = 'center';
+    const lbl = chip.classList.contains('on') ? 'Simulated' : 'You';
+    ctx.fillStyle = '#EEF2F5'; ctx.fillText(lbl, dx, dy + 26);
+  }
+  let raf = 0, mapVisible = true;
+  function loop(now) { render(now); if (driving) stepDrive(now); if (mapVisible && (driving || fade < 1 || !reduce)) raf = requestAnimationFrame(loop); else raf = 0; }
+  function kick() { if (!raf) raf = requestAnimationFrame(loop); }
+  new IntersectionObserver(([e]) => { mapVisible = e.isIntersecting; if (mapVisible) kick(); }).observe(map);
+
+  function setCity(i, animate) {
+    ci = i; const c = cities[i];
+    if (animate && city) { prev = city; fade = 0; fadeT0 = performance.now(); } else prev = null, fade = 1;
+    city = genCity(c);
+    $('#place-name').textContent = c.name; $('#place-ll').textContent = c.ll;
+    typeInto($('#q'), c.q);
+  }
+  function typeInto(el, text) {
+    if (reduce) { el.textContent = text; return; }
+    el.textContent = ''; let i = 0;
+    const id = setInterval(() => { el.textContent = text.slice(0, ++i); if (i >= text.length) clearInterval(id); }, 38);
+  }
+  function ripple() {
+    if (reduce) return;
+    const r = document.createElement('span'); r.className = 'ripple';
+    const rect = map.getBoundingClientRect();
+    const size = 60; r.style.cssText = `width:${size}px;height:${size}px;left:${dot.x * rect.width - size / 2}px;top:${dot.y * rect.height - size / 2}px;z-index:3`;
+    map.parentElement.appendChild(r); setTimeout(() => r.remove(), 1000);
+  }
+
+  const btn = $('#teleport');
+  let busy = false, idleTimer = 0;
+  function teleport() {
+    if (busy) return; busy = true; clearTimeout(idleTimer);
+    btn.classList.add('busy'); btn.firstChild.textContent = 'Teleporting';
+    setTimeout(() => {
+      dot = { x: .5, y: .45 }; route = null; driving = null;
+      chip.classList.add('on'); chipT.textContent = 'Simulating'; chipS.textContent = cities[ci].name + ' · ' + cities[ci].ll; chipS.classList.add('mono');
+      setCity(ci, true); ripple(); kick();
+      btn.classList.remove('busy'); btn.firstChild.textContent = 'Teleport here';
+      busy = false;
+      idleTimer = setTimeout(startDrive, 2600);
+    }, 900);
+  }
+  btn.addEventListener('click', teleport);
+
+  function startDrive() {
+    route = makeRoute(city, dot); const L = routeLen(route);
+    driving = { t0: performance.now(), dur: 7000 + L * 6000, heading: 0, stopped: false };
+    showTab('drive'); kick();
+  }
+  const spd = $('#spd'), speedo = $('#speedo'), prog = $('#drive-prog'), driveS = $('#drive-s'), driveT = $('#drive-t');
+  function stepDrive(now) {
+    const d = driving; let f = clamp((now - d.t0) / d.dur, 0, 1);
+    const stopAt = 0.45, stopLen = 0.14;
+    let mph, pos;
+    if (f < stopAt) { pos = f / stopAt * 0.5; mph = 34 * Math.sin(Math.PI * clamp(pos / 0.5, 0, 1)) ; }
+    else if (f < stopAt + stopLen) { pos = 0.5; mph = 0; }
+    else { const g = (f - stopAt - stopLen) / (1 - stopAt - stopLen); pos = 0.5 + g * 0.5; mph = 31 * Math.sin(Math.PI * g); }
+    mph = Math.round(Math.max(0, mph));
+    const p = pointAt(route, pos), q = pointAt(route, Math.min(1, pos + 0.01));
+    d.heading = Math.atan2(q.y - p.y, q.x - p.x); dot = p;
+    spd.textContent = mph; speedo.style.setProperty('--v', (mph / 45 * 100) + '%');
+    prog.style.width = (pos * 100) + '%';
+    driveT.textContent = mph === 0 && f > 0.3 && f < 0.7 ? 'Stopped at a light' : 'Drive to Stop 2';
+    driveS.textContent = mph + ' mph, limit 35, ' + (1.4 * (1 - pos)).toFixed(1) + ' mi left';
+    if (f >= 1) { driving = null; driveT.textContent = 'Arrived at Stop 2'; driveS.textContent = 'Holding here. Idle drift on.'; idleTimer = setTimeout(nextCity, 3200); }
+  }
+  function nextCity() {
+    showTab('places'); ci = (ci + 1) % cities.length;
+    const c = cities[ci]; $('#place-name').textContent = c.name; $('#place-ll').textContent = c.ll; typeInto($('#q'), c.q);
+    idleTimer = setTimeout(() => { if (!busy && mapVisible) teleport(); else idleTimer = setTimeout(nextCity, 4000); }, 2600);
+  }
+  setCity(0, false); kick();
+  addEventListener('resize', kick);
+  if (!reduce) idleTimer = setTimeout(() => { if (!busy) teleport(); }, 3200);
+}
+
+/* ---------------- marquee ---------------- */
+{
+  const apps = [
+    ['Find My', 0], ['Life360', 1], ['Snap Map', 0], ['Tinder', 0], ['Hinge', 0], ['Bumble', 0], ['Pokémon GO', 1], ['Instagram', 0], ['WhatsApp', 0], ['Google Maps', 0], ['Apple Maps', 0], ['BeReal', 0], ['Uber', 1], ['Lyft', 1], ['Strava', 0], ['Yelp', 0], ['Grindr', 0], ['DoorDash', 0], ['Airbnb', 0], ['Weather', 0], ['Facebook', 0], ['Monopoly GO', 1], ['Zenly', 0], ['Waze', 0],
+  ];
+  const mk = (a, i) => `<span class="chip"><i class="${a[1] ? 'tell' : ''}"></i>${a[0]}<small>${a[1] ? 'can read the flag' : 'covered'}</small></span>`;
+  const half = Math.ceil(apps.length / 2);
+  const t1 = apps.slice(0, half).map(mk).join(''), t2 = apps.slice(half).map(mk).join('');
+  $('#track1').innerHTML = t1 + t1; $('#track2').innerHTML = t2 + t2;
+}
+
+/* ---------------- journey demo ---------------- */
+{
+  const dotEl = $('#jdot'), gJump = $('#j-jump'), gJour = $('#j-journey'), log = $('#jlog');
+  const tagJump = $('#tag-jump'), tag1 = $('#tag-j1'), tag2 = $('#tag-j2');
+  const legs = ['#leg1', '#leg2', '#leg3'].map(s => $(s));
+  let mode = 'jump', run = 0, visible = false;
+  const lines = {
+    jump: [['09:41:07', 'Dallas, TX', ''], ['09:41:08', 'Tokyo, Japan', ''], ['', '6,400 mi in one second. Every history reader sees it.', 'bad']],
+    journey: [['09:41', 'Leaves home, drives to DFW. Real roads, real stops.', ''], ['10:12', 'Terminal. 82 minutes of ordinary GPS wander at the gate.', ''], ['11:34', 'Airplane mode. No fixes. Last one is the gate.', ''], ['15:20', 'HND arrivals. Then a drive to the pin.', ''], ['', 'Nothing to flag. It looks like a person who flew.', 'good']],
+  };
+  function setLog(k, upto) {
+    log.innerHTML = lines[k].map((l, i) => `<div class="${i < upto ? 'in' : ''}"><span class="mono">${l[0]}</span><span class="${l[2]}">${l[1]}</span></div>`).join('');
+  }
+  function reveal(i) { const d = log.children[i]; if (d) d.classList.add('in'); }
+  function at(path, f) { const L = path.getTotalLength(); const p = path.getPointAtLength(L * f); dotEl.setAttribute('cx', p.x); dotEl.setAttribute('cy', p.y); }
+  function play() {
+    const id = ++run; setLog(mode, 0);
+    [tagJump, tag1, tag2].forEach(t => t.hidden = true);
+    gJump.style.opacity = mode === 'jump' ? 1 : 0; gJour.style.opacity = mode === 'journey' ? 1 : 0;
+    dotEl.setAttribute('cx', 70); dotEl.setAttribute('cy', 250);
+    const step = (ms) => new Promise(r => setTimeout(r, reduce ? 0 : ms));
+    const anim = (path, ms) => new Promise(res => {
+      if (reduce) { at(path, 1); return res(); }
+      const t0 = performance.now();
+      (function fr(now) { if (id !== run) return; const f = clamp((now - t0) / ms, 0, 1); at(path, ease(f)); f < 1 ? requestAnimationFrame(fr) : res(); })(t0);
+    });
+    (async () => {
+      await step(500); if (id !== run) return;
+      if (mode === 'jump') {
+        reveal(0); await step(900); if (id !== run) return;
+        dotEl.setAttribute('cx', 410); dotEl.setAttribute('cy', 80); reveal(1);
+        await step(500); if (id !== run) return; tagJump.hidden = false; reveal(2);
+        await step(4200); if (id === run && visible) play();
+      } else {
+        reveal(0); await anim(legs[0], 2200); if (id !== run) return;
+        tag1.hidden = false; reveal(1); await step(1600); if (id !== run) return;
+        reveal(2); await anim(legs[1], 2600); if (id !== run) return;
+        tag2.hidden = false; reveal(3); await step(900); if (id !== run) return;
+        await anim(legs[2], 1500); if (id !== run) return; reveal(4);
+        await step(4500); if (id === run && visible) play();
+      }
+    })();
+  }
+  $$('.seg [data-mode]').forEach(b => b.addEventListener('click', () => {
+    $$('.seg [data-mode]').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+    mode = b.dataset.mode; play();
+  }));
+  new IntersectionObserver(([e]) => { const was = visible; visible = e.isIntersecting; if (visible && !was) play(); if (!visible) run++; }, { threshold: .35 }).observe($('#jmap'));
+  setLog('jump', 0);
+}
+
+/* ---------------- exposure demo ---------------- */
+{
+  const state = { ip: false, tz: false, motion: false };
+  const cost = { ip: 35, tz: 24, motion: 30 };
+  const ring = $('#ring'), n = $('#ring-n'), st = $('#score-t'), ss = $('#score-s');
+  const ok = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+  const bad = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>';
+  let shown = 41;
+  function update() {
+    let score = 100, open = 0;
+    for (const k in state) {
+      const leakBad = k === 'motion' ? state[k] : !state[k];
+      const el = $(`.leak[data-key=${k}]`);
+      el.dataset.state = leakBad ? 'bad' : 'ok';
+      el.querySelector('.ic').innerHTML = leakBad ? bad : ok;
+      const s = el.querySelector('.s'); s.textContent = leakBad ? s.dataset.bad : s.dataset.ok;
+      el.querySelector('.fix').textContent = leakBad ? { ip: 'Set your VPN to Tokyo, Japan', tz: 'Settings, then Date & Time', motion: 'Put the phone in the car, or don’t fake a drive' }[k] : '';
+      if (leakBad) { score -= cost[k]; open++; }
+    }
+    const target = score;
+    const c = target < 55 ? 'var(--danger)' : target < 85 ? 'var(--warn)' : 'var(--ok)';
+    ring.style.setProperty('--c', c);
+    st.textContent = target >= 85 ? 'Cover holds' : target >= 55 ? 'Close, one more thing' : 'Cover is blown';
+    ss.textContent = open ? `${open} thing${open > 1 ? 's' : ''} to close before you start. Cloak would pause the drive if the VPN dropped.` : 'Everything readable matches the pin. The only remaining tell is the flag nobody can hide.';
+    const from = shown, t0 = performance.now();
+    (function fr(now) { const f = reduce ? 1 : clamp((now - t0) / 600, 0, 1); shown = Math.round(lerp(from, target, ease(f))); n.textContent = shown; ring.style.setProperty('--v', shown + '%'); if (f < 1) requestAnimationFrame(fr); })(t0);
+  }
+  $$('.sw').forEach(sw => sw.addEventListener('click', () => { const k = sw.dataset.key; state[k] = !state[k]; sw.setAttribute('aria-checked', String(state[k])); update(); }));
+}
+
+/* ---------------- rehearse demo ---------------- */
+{
+  const W = 480, H = 240, top = 14, bottom = 224;
+  const speedP = $('#speed'), fillP = $('#speed-fill'), limitP = $('#limit'), stops = $('#stops'), weak = $('#weak');
+  const grade = $('#grade'), gt = $('#grade-t'), gs = $('#grade-s');
+  const segs = [[0, .22, 30], [.22, .48, 35], [.48, .62, 25], [.62, 1, 45]];
+  const lights = [.33, .70];
+  const y = mph => bottom - (mph / 55) * (bottom - top);
+  function build(persona) {
+    const p = persona / 100;
+    const accel = lerp(2.2, 6.5, p), over = lerp(-3, 7, p), brake = lerp(2.5, 7.5, p);
+    const N = 160, pts = [];
+    let v = 0;
+    for (let i = 0; i <= N; i++) {
+      const x = i / N;
+      const seg = segs.find(s => x >= s[0] && x <= s[1]) || segs[segs.length - 1];
+      let target = seg[2] + over;
+      const nextLight = lights.find(l => l > x - 0.005);
+      if (nextLight !== undefined) {
+        const dist = nextLight - x;
+        const stopV = Math.sqrt(Math.max(0, dist)) * brake * 12;
+        if (dist < 0.13) target = Math.min(target, stopV);
+      }
+      const nextSeg = segs.find(s => s[0] > x && s[0] - x < 0.06);
+      if (nextSeg && nextSeg[2] < seg[2]) target = Math.min(target, nextSeg[2] + over + (nextSeg[0] - x) * 300);
+      if (x > 0.93) target = Math.min(target, (1 - x) * 260);
+      v = v < target ? Math.min(target, v + accel) : Math.max(target, v - brake * 1.4);
+      pts.push([x * W, Math.max(0, v)]);
+    }
+    let maxStep = 0, at = 0;
+    for (let i = 1; i < pts.length * 0.94; i++) { const s = Math.abs(pts[i][1] - pts[i - 1][1]); if (s > maxStep) { maxStep = s; at = i; } }
+    speedP.setAttribute('d', pts.map((q, i) => (i ? 'L' : 'M') + q[0].toFixed(1) + ' ' + y(q[1]).toFixed(1)).join(''));
+    fillP.setAttribute('d', 'M0 ' + bottom + pts.map(q => 'L' + q[0].toFixed(1) + ' ' + y(q[1]).toFixed(1)).join('') + 'L' + W + ' ' + bottom + 'Z');
+    limitP.setAttribute('d', segs.map((s, i) => (i ? 'L' : 'M') + (s[0] * W).toFixed(1) + ' ' + y(s[2]).toFixed(1) + 'L' + (s[1] * W).toFixed(1) + ' ' + y(s[2]).toFixed(1)).join(''));
+    stops.innerHTML = lights.map(l => `<line x1="${l * W}" x2="${l * W}" y1="${top}" y2="${bottom}" stroke="#3A444E" stroke-width="1" stroke-dasharray="2 4"/><rect x="${l * W - 4}" y="${top}" width="8" height="18" rx="3" fill="#20282F" stroke="#3A444E"/><circle cx="${l * W}" cy="${top + 5}" r="2" fill="#FF6B6F"/><circle cx="${l * W}" cy="${top + 13}" r="2" fill="#4FE096" opacity=".5"/>`).join('');
+    weak.setAttribute('transform', `translate(${pts[at][0]} ${y(pts[at][1])})`);
+    const g = maxStep < 4.5 ? ['A', 'Passes clean.', 'No fix disagrees with its neighbour by more than a real car could manage.'] :
+      maxStep < 6.5 ? ['A-', 'Passes. Weakest second is the brake into the first light.', `${maxStep.toFixed(0)} mph step between neighbouring fixes. A real driver does that too.`] :
+      maxStep < 9 ? ['B', 'Would pass most readers.', `${maxStep.toFixed(0)} mph in one second is a hard brake. Cloak smooths the worst one before sending.`] :
+      ['C', 'Rehearse would stop you here.', `${maxStep.toFixed(0)} mph in one second is not a car, it is a bug. Fix: ease the persona, or let Cloak clamp it.`];
+    grade.textContent = g[0]; grade.classList.toggle('mid', g[0] === 'B' || g[0] === 'C'); gt.textContent = g[1]; gs.textContent = g[2];
+    const mins = Math.round(lerp(13, 9, p)); $('#trace-len').textContent = `4.2 mi, ${mins} min`;
+  }
+  const sl = $('#persona');
+  sl.addEventListener('input', () => build(+sl.value)); build(+sl.value);
+}
+
+/* ---------------- reveals fallback ---------------- */
+if (!reduce && !CSS.supports('(animation-timeline: view()) and (animation-range: entry)')) {
+  const els = $$('.reveal');
+  const io = new IntersectionObserver(es => es.forEach(e => { if (e.isIntersecting) { e.target.classList.remove('pre'); io.unobserve(e.target); } }), { rootMargin: '0px 0px -8% 0px' });
+  els.forEach(el => { if (el.getBoundingClientRect().top > innerHeight) { el.classList.add('pre'); io.observe(el); } });
+}
+
+/* ---------------- buy, toast ---------------- */
+{
+  const toast = $('#toast'); let tt = 0;
+  const say = (m) => { toast.textContent = m; toast.classList.add('show'); clearTimeout(tt); tt = setTimeout(() => toast.classList.remove('show'), 3200); };
+  const postit = $('#postit');
+  $('#buy').addEventListener('click', () => { postit.classList.add('show'); say('Checkout isn’t wired up yet. Grab the free 10 minutes meanwhile.'); setTimeout(() => postit.classList.remove('show'), 5000); });
+}
+})();
+</script>
+</body>
+</html>

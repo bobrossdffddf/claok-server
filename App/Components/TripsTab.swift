@@ -3,14 +3,17 @@ import SwiftData
 import UniformTypeIdentifiers
 import CloakKit
 
-struct TripsTab: View {
-    private enum Pane: String, CaseIterable, Identifiable {
-        case recordings = "Recordings"
-        case schedule = "Schedule"
-        case routine = "Routine"
-        var id: String { rawValue }
-    }
-
+/// The trips card: recordings, schedules, the routine and the flight
+/// planner, as one scrolling list of groups.
+///
+/// These used to be four panes behind a segmented control inside the tab,
+/// which made them a third level of navigation inside a sheet that already had
+/// one. Each is short enough to be a section, so now they are: every primary
+/// action is one scroll away, nothing is hidden behind a control whose other
+/// three states you have to remember, and the flight planner, which is a full
+/// editor of its own, opens as a sheet the way the schedule and routine
+/// editors always have.
+struct TripsCard: View {
     @Environment(AppModel.self) private var model
     @Environment(RunScheduler.self) private var scheduler
     @Environment(\.modelContext) private var context
@@ -19,34 +22,36 @@ struct TripsTab: View {
     @Query(sort: \ScheduledRun.createdAt, order: .reverse) private var runs: [ScheduledRun]
     @Query(sort: \Routine.createdAt, order: .reverse) private var routines: [Routine]
 
-    @State private var pane: Pane = .recordings
     @State private var showsImporter = false
     @State private var editing: ScheduledRun?
     @State private var creating = false
     @State private var editingRoutine: Routine?
     @State private var creatingRoutine = false
+    @State private var buildingCover = false
+    @State private var showsFlight = false
+
+    let chrome: CardContext
+
+    private var journey: JourneyController { JourneyController.shared }
 
     var body: some View {
-        ScrollView {
+        FloatingCard(title: "Trips", collapsible: true, onClose: chrome.onClose) {
             VStack(alignment: .leading, spacing: Metrics.regular) {
-                Picker("", selection: $pane) {
-                    ForEach(Pane.allCases) { Text($0.rawValue).tag($0) }
+                recordSection
+                scheduleSection
+                routineSection
+                if let first = routines.first {
+                    todaySection(first)
                 }
-                .pickerStyle(.segmented)
-
-                switch pane {
-                case .recordings: recordings
-                case .schedule: schedule
-                case .routine: routine
-                }
+                flightSection
             }
-            .padding(.horizontal, Metrics.regular)
-            .padding(.vertical, Metrics.regular)
         }
         .sheet(isPresented: $creating) { ScheduleEditor() }
         .sheet(item: $editing) { ScheduleEditor(existing: $0) }
         .sheet(isPresented: $creatingRoutine) { RoutineEditor() }
+        .sheet(isPresented: $buildingCover) { LivingCoverView() }
         .sheet(item: $editingRoutine) { RoutineEditor(existing: $0) }
+        .sheet(isPresented: $showsFlight) { flightEditor }
         .fileImporter(isPresented: $showsImporter, allowedContentTypes: [.xml, .data]) { result in
             guard case .success(let url) = result else { return }
             guard url.startAccessingSecurityScopedResource() else { return }
@@ -64,104 +69,89 @@ struct TripsTab: View {
         }
     }
 
-    // MARK: - Recordings
+    // MARK: - Record
 
-    private var recordings: some View {
-        VStack(alignment: .leading, spacing: Metrics.regular) {
-            recordCard
+    private var recordSection: some View {
+        CardGroup(title: "Record") {
+            VStack(alignment: .leading, spacing: Metrics.snug) {
+                if model.isRecording {
+                    HStack(spacing: Metrics.snug) {
+                        Image(systemName: "record.circle.fill")
+                            .foregroundStyle(Palette.danger)
+                            .symbolEffect(.pulse, isActive: true)
+                            .accessibilityHidden(true)
+                        Text("Recording, \(model.recordingFixes.count) points\(model.isRecordingReal ? " from your real drive" : "")")
+                            .font(.subheadline.monospacedDigit())
+                            .foregroundStyle(Color(.label))
+                            .lineLimit(1)
+                    }
 
-            Button {
-                showsImporter = true
-            } label: {
-                Label("Import a GPX file", systemImage: "square.and.arrow.down")
+                    Button {
+                        let fixes = model.finishRecording()
+                        guard fixes.count > 1 else {
+                            model.banner = "Not enough points to save."
+                            return
+                        }
+                        context.insert(RecordedTrip(name: "Trip \(trips.count + 1)", fixes: fixes))
+                    } label: {
+                        Label("Stop and save", systemImage: "stop.fill")
+                    }
+                    .buttonStyle(PrimaryButtonStyle(tint: Palette.danger))
+                } else {
+                    Button {
+                        model.startRecording()
+                    } label: {
+                        Label(model.snapshot.isRunning ? "Start recording" : "Record my real drive", systemImage: "record.circle")
+                    }
+                    .buttonStyle(PrimaryButtonStyle())
+                }
             }
-            .buttonStyle(QuietButtonStyle())
+            .padding(Metrics.snug)
+
+            GroupDivider()
 
             if trips.isEmpty {
-                EmptyNote(
-                    symbol: "waveform.path.ecg",
-                    title: "Nothing recorded yet",
-                    detail: "Start something moving, then hit record. Cloak keeps the timing and the stops, so replaying it looks like the same trip again.")
+                emptyLine("Nothing recorded yet")
+                GroupDivider()
             } else {
-                Section(title: "Saved") {
-                    ForEach(trips) { trip in
-                        tripRow(trip, last: trip.id == trips.last?.id)
-                    }
+                ForEach(trips) { trip in
+                    tripRow(trip)
+                    GroupDivider(inset: 52)
                 }
+            }
+
+            GroupActionRow(title: "Import a GPX file", symbol: "square.and.arrow.down", showsChevron: false) {
+                showsImporter = true
             }
         }
     }
 
-    private var recordCard: some View {
-        VStack(alignment: .leading, spacing: Metrics.snug) {
-            HStack(spacing: Metrics.snug) {
-                ZStack {
-                    Circle()
-                        .fill((model.isRecording ? Palette.danger : Palette.accent).opacity(0.16))
-                        .frame(width: 38, height: 38)
-                    Image(systemName: model.isRecording ? "record.circle.fill" : "record.circle")
-                        .font(.system(.body, weight: .semibold))
-                        .foregroundStyle(model.isRecording ? Palette.danger : Palette.accent)
-                        .symbolEffect(.pulse, isActive: model.isRecording)
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(model.isRecording ? "Recording" : "Record this trip")
-                        .font(.label(15, weight: .semibold))
-                        .foregroundStyle(.white)
-                    Text(model.isRecording
-                         ? "\(model.recordingFixes.count) points so far\(model.isRecordingReal ? ", from your real drive" : "")"
-                         : (model.snapshot.isRunning
-                            ? "Captures the running simulation, with its real timing."
-                            : "Records your real drive so you can replay it later."))
-                        .font(.label(12))
-                        .foregroundStyle(Palette.dim)
-                }
-                Spacer(minLength: 0)
-            }
-
-            if model.isRecording {
-                Button("Stop and save") {
-                    let fixes = model.finishRecording()
-                    guard fixes.count > 1 else {
-                        model.banner = "Not enough points to save."
-                        return
-                    }
-                    context.insert(RecordedTrip(name: "Trip \(trips.count + 1)", fixes: fixes))
-                }
-                .buttonStyle(PrimaryButtonStyle(tint: Palette.danger))
-            } else {
-                Button(model.snapshot.isRunning ? "Start recording" : "Record my real drive") { model.startRecording() }
-                    .buttonStyle(PrimaryButtonStyle())
-            }
-        }
-        .padding(Metrics.card)
-        .background(Palette.surface, in: .rect(cornerRadius: Metrics.cardRadius, style: .continuous))
-    }
-
-    private func tripRow(_ trip: RecordedTrip, last: Bool) -> some View {
-        Row(symbol: "arrow.clockwise.circle.fill",
-            title: trip.name,
-            subtitle: summary(trip),
-            showsDivider: !last) {
-            HStack(spacing: 14) {
+    private func tripRow(_ trip: RecordedTrip) -> some View {
+        CardRow(value: trip.name, detail: summary(trip)) {
+            Image(systemName: "point.bottomleft.forward.to.point.topright.scurvepath")
+                .foregroundStyle(Color(.secondaryLabel))
+                .frame(width: 24)
+        } trailing: {
+            HStack(spacing: 0) {
                 ShareLink(item: exportURL(trip)) {
                     Image(systemName: "square.and.arrow.up")
-                        .font(.system(.footnote, weight: .semibold))
-                        .foregroundStyle(Palette.dim)
-                }
-                Button {
-                    Task { await model.replay(trip) }
-                } label: {
-                    Image(systemName: "play.fill")
-                        .font(.system(.footnote, weight: .semibold))
-                        .foregroundStyle(Palette.accent)
+                        .font(.body)
+                        .foregroundStyle(Color(.secondaryLabel))
+                        .frame(width: 44, height: 44)
+                        .contentShape(.rect)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Share \(trip.name)")
+
+                RowIconButton(symbol: "play.fill", tint: Color(.label), label: "Replay \(trip.name)") {
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    Task { await model.replay(trip) }
+                }
             }
         }
         .contextMenu {
-            Button("Replay") { Task { await model.replay(trip) } }
-            Button("Delete", role: .destructive) { context.delete(trip) }
+            Button("Replay", systemImage: "play") { Task { await model.replay(trip) } }
+            Button("Delete", systemImage: "trash", role: .destructive) { context.delete(trip) }
         }
     }
 
@@ -182,106 +172,153 @@ struct TripsTab: View {
         return url
     }
 
+    // MARK: - Schedule
+
+    private var scheduleSection: some View {
+        CardGroup(title: "Schedule") {
+            if let next = scheduler.nextUp {
+                HStack(spacing: Metrics.snug) {
+                    Image(systemName: "clock")
+                        .foregroundStyle(Color(.secondaryLabel))
+                        .frame(width: 24)
+                    Text("Next: \(next.name) ")
+                        .foregroundStyle(Color(.label))
+                    + Text(next.at, style: .relative)
+                        .foregroundStyle(Color(.secondaryLabel))
+                }
+                .font(.subheadline)
+                .lineLimit(1)
+                .padding(.horizontal, 14)
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                GroupDivider(inset: 52)
+            }
+
+            if runs.isEmpty {
+                emptyLine("Nothing scheduled")
+                GroupDivider()
+            } else {
+                ForEach(runs) { run in
+                    scheduleRow(run)
+                    GroupDivider(inset: 52)
+                }
+            }
+
+            GroupActionRow(title: "New schedule", symbol: "plus", showsChevron: false) {
+                creating = true
+            }
+        }
+    }
+
+    private func scheduleRow(_ run: ScheduledRun) -> some View {
+        CardRow(value: run.name, detail: run.scheduleText) {
+            Image(systemName: run.kind.symbol)
+                .foregroundStyle(Color(.secondaryLabel))
+                .frame(width: 24)
+        } trailing: {
+            Toggle("", isOn: Binding(
+                get: { run.isEnabled },
+                set: { run.isEnabled = $0; try? context.save(); scheduler.refresh() }
+            ))
+            .labelsHidden()
+            .tint(Palette.accent)
+            .padding(.trailing, Metrics.tight)
+            .accessibilityLabel("\(run.name) on")
+        }
+        .onTapGesture { editing = run }
+        .accessibilityAction(named: "Edit") { editing = run }
+        .contextMenu {
+            Button("Edit", systemImage: "pencil") { editing = run }
+            Button("Delete", systemImage: "trash", role: .destructive) {
+                context.delete(run)
+                try? context.save()
+                scheduler.refresh()
+            }
+        }
+    }
+
     // MARK: - Routine
 
-    private var routine: some View {
-        VStack(alignment: .leading, spacing: Metrics.regular) {
+    private var routineSection: some View {
+        CardGroup(title: "Routine") {
             if let live = scheduler.routineNow {
-                VStack(alignment: .leading, spacing: Metrics.tight) {
-                    HStack(spacing: Metrics.snug) {
-                        ZStack {
-                            Circle().fill(Palette.ok.opacity(0.16)).frame(width: 34, height: 34)
-                            Image(systemName: "figure.walk.motion")
-                                .font(.system(.subheadline, weight: .semibold))
-                                .foregroundStyle(Palette.ok)
-                        }
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(live)
-                                .font(.label(15, weight: .semibold))
-                                .foregroundStyle(.white)
-                            if let next = scheduler.routineNext {
-                                Text("Then \(next.name) ")
-                                    .font(.label(12))
-                                    .foregroundStyle(Palette.dim)
-                                + Text(next.at, style: .relative)
-                                    .font(.label(12))
-                                    .foregroundStyle(Palette.dim)
-                            } else {
-                                Text("Running on its own")
-                                    .font(.label(12))
-                                    .foregroundStyle(Palette.dim)
-                            }
-                        }
-                        Spacer(minLength: 0)
-                    }
+                CardRow(value: live, detail: scheduler.routineNext.map { "Then \($0.name) at \($0.at.formatted(date: .omitted, time: .shortened))" } ?? "Running on its own") {
+                    Circle()
+                        .fill(Palette.ok)
+                        .frame(width: 10, height: 10)
+                        .frame(width: 24)
+                        .accessibilityHidden(true)
                 }
-                .padding(Metrics.card)
-                .background(Palette.ok.opacity(0.09), in: .rect(cornerRadius: Metrics.cardRadius, style: .continuous))
+                GroupDivider(inset: 52)
             }
 
             if routines.isEmpty {
-                EmptyNote(
-                    symbol: "house.and.flag",
-                    title: "No routine yet",
-                    detail: "A routine runs your phone's whole day: asleep at home, out at the usual time give or take a few minutes, parked at work drifting the way a real phone does, home in the evening. No two days come out the same.")
-
-                Button {
-                    creatingRoutine = true
-                } label: {
-                    Label("Set up a routine", systemImage: "plus")
-                }
-                .buttonStyle(PrimaryButtonStyle())
+                emptyLine("No routine yet")
+                GroupDivider()
             } else {
-                Section(title: "Routine") {
-                    ForEach(Array(routines.enumerated()), id: \.element.id) { index, item in
-                        Row(symbol: "house.and.flag",
-                            title: item.name,
-                            subtitle: item.summary,
-                            tint: item.isEnabled ? Palette.accent : Palette.dim,
-                            showsDivider: index < routines.count - 1) {
-                            Toggle("", isOn: Binding(
-                                get: { item.isEnabled },
-                                set: { item.isEnabled = $0; try? context.save() }
-                            ))
-                            .labelsHidden()
-                        }
-                        .contentShape(.rect)
-                        .onTapGesture { editingRoutine = item }
-                        .contextMenu {
-                            Button("Edit") { editingRoutine = item }
-                            Button("Delete", role: .destructive) {
-                                context.delete(item)
-                                try? context.save()
-                            }
+                ForEach(routines) { item in
+                    CardRow(value: item.name, detail: item.summary) {
+                        Image(systemName: "house")
+                            .foregroundStyle(Color(.secondaryLabel))
+                            .frame(width: 24)
+                    } trailing: {
+                        Toggle("", isOn: Binding(
+                            get: { item.isEnabled },
+                            set: { item.isEnabled = $0; try? context.save() }
+                        ))
+                        .labelsHidden()
+                        .tint(Palette.accent)
+                        .padding(.trailing, Metrics.tight)
+                        .accessibilityLabel("\(item.name) on")
+                    }
+                    .onTapGesture { editingRoutine = item }
+                    .accessibilityAction(named: "Edit") { editingRoutine = item }
+                    .contextMenu {
+                        Button("Edit", systemImage: "pencil") { editingRoutine = item }
+                        Button("Delete", systemImage: "trash", role: .destructive) {
+                            context.delete(item)
+                            try? context.save()
                         }
                     }
-                }
-
-                if let first = routines.first {
-                    Section(title: "Today", footer: "Times shift a little every day, drawn from the routine's own seed, so the same plan never repeats exactly.") {
-                        let plan = first.plan()
-                        ForEach(Array(plan.segments.enumerated()), id: \.offset) { index, segment in
-                            Row(symbol: symbol(for: segment.kind),
-                                title: segment.kind.name,
-                                subtitle: clock(segment.start),
-                                tint: segment.contains(.now) ? Palette.ok : Palette.dim,
-                                showsDivider: index < plan.segments.count - 1)
-                        }
-                    }
+                    GroupDivider(inset: 52)
                 }
             }
 
-            HStack(spacing: Metrics.snug) {
-                Image(systemName: "hand.raised.fill")
-                    .font(.system(.footnote))
-                    .foregroundStyle(Palette.warn)
-                Text("Anything you start by hand takes priority. The routine picks up again at the next change.")
-                    .font(.label(12))
-                    .foregroundStyle(Palette.dim)
-                    .fixedSize(horizontal: false, vertical: true)
+            GroupActionRow(title: routines.isEmpty ? "Build my week from real places" : "Build another week", symbol: "sparkles", showsChevron: false) {
+                buildingCover = true
             }
-            .padding(Metrics.snug)
-            .background(Palette.surface.opacity(0.5), in: .rect(cornerRadius: 12, style: .continuous))
+
+            if routines.isEmpty {
+                GroupDivider(inset: 52)
+                GroupActionRow(title: "Set one up by hand", symbol: "plus", showsChevron: false) {
+                    creatingRoutine = true
+                }
+            }
+        }
+    }
+
+    private func todaySection(_ routine: Routine) -> some View {
+        CardGroup(title: "Today") {
+            let plan = routine.plan()
+            ForEach(Array(plan.segments.enumerated()), id: \.offset) { index, segment in
+                let now = segment.contains(.now)
+                if index > 0 { GroupDivider(inset: 52) }
+                HStack(spacing: Metrics.snug) {
+                    Image(systemName: symbol(for: segment.kind))
+                        .foregroundStyle(now ? AnyShapeStyle(Palette.ok) : AnyShapeStyle(Color(.secondaryLabel)))
+                        .frame(width: 24)
+                    Text(segment.kind.name)
+                        .foregroundStyle(Color(.label))
+                    Spacer(minLength: Metrics.tight)
+                    Text(clock(segment.start))
+                        .font(.live(.subheadline, weight: .regular))
+                        .foregroundStyle(Color(.secondaryLabel))
+                }
+                .font(.body)
+                .padding(.horizontal, 14)
+                .frame(minHeight: 44)
+                .accessibilityElement(children: .combine)
+                .accessibilityAddTraits(now ? .isSelected : [])
+            }
         }
     }
 
@@ -298,73 +335,81 @@ struct TripsTab: View {
         return formatter.string(from: date)
     }
 
-    // MARK: - Schedule
+    // MARK: - Flight
 
-    private var schedule: some View {
-        VStack(alignment: .leading, spacing: Metrics.regular) {
+    private var flightSection: some View {
+        CardGroup(title: "Flight") {
             Button {
-                creating = true
+                showsFlight = true
             } label: {
-                Label("New schedule", systemImage: "plus")
-            }
-            .buttonStyle(PrimaryButtonStyle())
-
-            if let next = scheduler.nextUp {
-                HStack(spacing: Metrics.snug) {
-                    Image(systemName: "clock.badge.checkmark")
-                        .font(.system(.subheadline, weight: .semibold))
-                        .foregroundStyle(Palette.accent)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("Next up: \(next.name)")
-                            .font(.label(14, weight: .semibold))
-                            .foregroundStyle(.white)
-                        Text(next.at, style: .relative)
-                            .font(.readout(12, weight: .regular))
-                            .foregroundStyle(Palette.dim)
+                CardRow(value: flightTitle, detail: flightDetail,
+                        valueColor: Color(.label)) {
+                    if journey.planning {
+                        ProgressView().controlSize(.small).frame(width: 24)
+                    } else {
+                        Image(systemName: "airplane")
+                            .foregroundStyle(Color(.secondaryLabel))
+                            .frame(width: 24)
                     }
-                    Spacer(minLength: 0)
-                }
-                .padding(Metrics.snug)
-                .background(Palette.accent.opacity(0.10), in: .rect(cornerRadius: 14, style: .continuous))
-            }
-
-            if runs.isEmpty {
-                EmptyNote(
-                    symbol: "calendar.badge.clock",
-                    title: "Nothing scheduled",
-                    detail: "Set a place, route or recording to start at a time you choose — once, or every week.")
-            } else {
-                Section(title: "Scheduled") {
-                    ForEach(runs) { run in
-                        scheduleRow(run, last: run.id == runs.last?.id)
-                    }
+                } trailing: {
+                    RowChevron()
                 }
             }
+            .buttonStyle(RowButtonStyle())
+            .accessibilityHint("Opens the flight itinerary")
         }
     }
 
-    private func scheduleRow(_ run: ScheduledRun, last: Bool) -> some View {
-        Row(symbol: run.kind.symbol,
-            title: run.name,
-            subtitle: run.scheduleText,
-            tint: run.isEnabled ? Palette.accent : Palette.dim,
-            showsDivider: !last) {
-            Toggle("", isOn: Binding(
-                get: { run.isEnabled },
-                set: { run.isEnabled = $0; try? context.save(); scheduler.refresh() }
-            ))
-            .labelsHidden()
+    private var flightTitle: String {
+        if journey.planning { return "Planning a trip" }
+        if journey.problem != nil { return "Could not plan the trip" }
+        if let itinerary = journey.proposal { return itinerary.summary }
+        return "No trip planned yet"
+    }
+
+    private var flightDetail: String {
+        if journey.planning { return "Working out the airports and naming both ends" }
+        if let problem = journey.problem { return problem }
+        if let itinerary = journey.proposal {
+            let leaves = itinerary.departs.formatted(date: .omitted, time: .shortened)
+            let arrives = itinerary.arrives.formatted(date: .omitted, time: .shortened)
+            return journey.isRunning ? "Under way. Arrives \(arrives)" : "Leaves \(leaves), arrives \(arrives)"
         }
-        .contentShape(.rect)
-        .onTapGesture { editing = run }
-        .contextMenu {
-            Button("Edit") { editing = run }
-            Button("Delete", role: .destructive) {
-                context.delete(run)
-                try? context.save()
-                scheduler.refresh()
+        return "Drop a pin, then Travel there"
+    }
+
+    /// The itinerary editor in the sheet it has room in, with the trip's one
+    /// primary action pinned under it.
+    private var flightEditor: some View {
+        NavigationStack {
+            List {
+                ItineraryEditor()
+            }
+            .listStyle(.insetGrouped)
+            .scrollContentBackground(.hidden)
+            .background(Palette.ground.ignoresSafeArea())
+            .pinnedAction { ItineraryAction() }
+            .navigationTitle("Flight")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { showsFlight = false }
+                }
             }
         }
+        .tint(Palette.accent)
+        .preferredColorScheme(.dark)
+    }
+
+    // MARK: - Empty
+
+    /// An empty group says so in one short line.
+    private func emptyLine(_ text: String) -> some View {
+        Text(text)
+            .font(.subheadline)
+            .foregroundStyle(Color(.secondaryLabel))
+            .padding(.horizontal, 14)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
     }
 }
 
@@ -378,18 +423,18 @@ struct EmptyNote: View {
         VStack(spacing: Metrics.tight) {
             Image(systemName: symbol)
                 .font(.system(.title, weight: .light))
-                .foregroundStyle(Palette.dim)
+                .foregroundStyle(.secondary)
             Text(title)
-                .font(.label(15, weight: .semibold))
-                .foregroundStyle(.white)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.primary)
             Text(detail)
-                .font(.label(12))
-                .foregroundStyle(Palette.dim)
+                .font(.caption)
+                .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 28)
+        .padding(.vertical, 24)
         .padding(.horizontal, Metrics.regular)
         .background(Palette.surface.opacity(0.5), in: .rect(cornerRadius: Metrics.cardRadius, style: .continuous))
     }

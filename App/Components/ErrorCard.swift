@@ -12,64 +12,66 @@ struct ErrorCard: View {
     private var friendly: FriendlyError { FriendlyError.make(raw) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Metrics.snug) {
-            HStack(spacing: 10) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(.subheadline, weight: .semibold))
-                    .foregroundStyle(Palette.warn)
+        VStack(alignment: .leading, spacing: Metrics.tight) {
+            Label {
                 Text(friendly.headline)
-                    .font(.label(16, weight: .semibold))
-                    .foregroundStyle(.white)
-                Spacer(minLength: 0)
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } icon: {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(Palette.warn)
             }
 
             Text(friendly.advice)
-                .font(.label(14))
-                .foregroundStyle(Palette.dim)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            HStack(spacing: 14) {
+            HStack(spacing: Metrics.loose) {
                 Button {
                     withAnimation(.snappy(duration: 0.25)) { showsDetail.toggle() }
                 } label: {
-                    HStack(spacing: 4) {
+                    Label {
                         Text(showsDetail ? "Hide detail" : "Show detail")
+                    } icon: {
                         Image(systemName: "chevron.down")
-                            .font(.system(.caption2, weight: .bold))
                             .rotationEffect(.degrees(showsDetail ? 180 : 0))
                     }
-                    .font(.label(12, weight: .semibold))
-                    .foregroundStyle(Palette.dim)
+                    .frame(minHeight: 44)
+                    .contentShape(.rect)
                 }
-                .buttonStyle(.plain)
 
                 Button {
                     UIPasteboard.general.string = friendly.technical
                     onCopy?()
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
                 } label: {
                     Label("Copy", systemImage: "doc.on.doc")
-                        .font(.label(12, weight: .semibold))
-                        .foregroundStyle(Palette.dim)
+                        .frame(minHeight: 44)
+                        .contentShape(.rect)
                 }
-                .buttonStyle(.plain)
 
-                Spacer()
+                Spacer(minLength: 0)
             }
+            .font(.subheadline.weight(.semibold))
+            .buttonStyle(.borderless)
 
             if showsDetail {
                 ScrollView(.vertical) {
                     Text(friendly.technical)
                         .font(.system(.caption2, design: .monospaced))
-                        .foregroundStyle(Palette.dim)
+                        .foregroundStyle(.secondary)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .frame(maxHeight: 160)
-                .padding(10)
-                .background(Palette.ground.opacity(0.6), in: .rect(cornerRadius: 10, style: .continuous))
+                .padding(Metrics.tight)
+                .background(Palette.ground.opacity(0.6), in: .rect(cornerRadius: Metrics.chip, style: .continuous))
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(Metrics.regular)
         .background(Palette.warn.opacity(0.09), in: .rect(cornerRadius: Metrics.cardRadius, style: .continuous))
         .overlay(
@@ -84,57 +86,59 @@ struct WifiNotice: View {
     var compact = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 12) {
-                Image(systemName: "antenna.radiowaves.left.and.right")
-                    .font(.system(compact ? .subheadline : .body, weight: .semibold))
-                    .foregroundStyle(Palette.warn)
-
+        VStack(alignment: .leading, spacing: Metrics.snug) {
+            Label {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("No local network")
-                        .font(.label(compact ? 14 : 15, weight: .semibold))
-                        .foregroundStyle(.white)
+                        .font(compact ? .subheadline.weight(.semibold) : .headline)
+                        .foregroundStyle(.primary)
                     Text("Cloak reaches iOS over a local network. On cellular, turn on Personal Hotspot and it makes one, no Wi-Fi needed. Or switch Wi-Fi on without joining anything.")
-                        .font(.label(12))
-                        .foregroundStyle(Palette.dim)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-
-                Spacer(minLength: 0)
+            } icon: {
+                Image(systemName: "antenna.radiowaves.left.and.right")
+                    .font(compact ? .subheadline.weight(.semibold) : .body.weight(.semibold))
+                    .foregroundStyle(Palette.warn)
             }
 
-            HStack(spacing: 8) {
+            HStack(spacing: Metrics.tight) {
                 Button {
                     if let url = URL(string: "App-Prefs:INTERNET_TETHERING") { UIApplication.shared.open(url) }
                     else if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
                 } label: {
                     Label("Turn on Hotspot", systemImage: "personalhotspot")
-                        .font(.label(13, weight: .semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .background(Palette.warn.opacity(0.9), in: .rect(cornerRadius: 12, style: .continuous))
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .background(Palette.warn, in: .rect(cornerRadius: Metrics.radius, style: .continuous))
                         .foregroundStyle(Palette.ground)
+                        .contentShape(.rect(cornerRadius: Metrics.radius, style: .continuous))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PressableStyle())
 
                 Button {
                     if let url = URL(string: "App-Prefs:WIFI") { UIApplication.shared.open(url) }
                     else if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
                 } label: {
                     Label("Wi-Fi", systemImage: "wifi")
-                        .font(.label(13, weight: .semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .background(Color.white.opacity(0.10), in: .rect(cornerRadius: 12, style: .continuous))
-                        .foregroundStyle(.white)
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .background(Palette.raised, in: .rect(cornerRadius: Metrics.radius, style: .continuous))
+                        .foregroundStyle(.primary)
+                        .contentShape(.rect(cornerRadius: Metrics.radius, style: .continuous))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PressableStyle())
             }
         }
-        .padding(compact ? 12 : Metrics.regular)
-        .background(Palette.warn.opacity(0.10), in: .rect(cornerRadius: Metrics.radius, style: .continuous))
+        .padding(compact ? Metrics.snug : Metrics.regular)
+        .background(Palette.warn.opacity(0.10), in: .rect(cornerRadius: Metrics.cardRadius, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: Metrics.radius, style: .continuous)
+            RoundedRectangle(cornerRadius: Metrics.cardRadius, style: .continuous)
                 .strokeBorder(Palette.warn.opacity(0.3), lineWidth: 1)
         )
     }

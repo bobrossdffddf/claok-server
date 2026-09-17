@@ -139,6 +139,14 @@ actor SimulationEngine {
         return await link.state.lastError ?? "The link is not up."
     }
 
+    func dropLink() async {
+        await link.tearDown()
+    }
+
+    func linkProblem() async -> String? {
+        await ensureLink()
+    }
+
     private func ensureLink() async -> String? {
         if await link.state.isReady { return nil }
         return await probe()
@@ -206,7 +214,7 @@ actor SimulationEngine {
                 reconnectCount: snapshot.reconnectCount
             )
         } else {
-            let polyline = Polyline(points: payload.points).densified(spacing: 5)
+            let polyline = Polyline(points: payload.points).densified(spacing: 4)
             let limits = payload.postedLimits.count == polyline.points.count
                 ? payload.postedLimits
                 : Array(repeating: RoadClass.residential.defaultLimit, count: polyline.points.count)
@@ -217,6 +225,7 @@ actor SimulationEngine {
                 persona: persona,
                 mode: payload.mode,
                 speedHelp: SpeedHelp.load(),
+                walkingSpans: payload.walkingSpans,
                 seed: payload.seed
             )
             engine = MotionEngine(
@@ -250,6 +259,7 @@ actor SimulationEngine {
 
     private func startTicker() {
         lastTick = nil
+        catchUpDebt = 0
         ticker = Task { [weak self] in
             let clock = ContinuousClock()
             var deadline = clock.now
@@ -267,13 +277,53 @@ actor SimulationEngine {
 
     /// Seconds since the previous tick, bounded so a suspended app does not
     /// teleport the car when it wakes.
+    /// Seconds the simulation owes itself: real time that passed while the
+    /// app was not getting ticks.
+    private var catchUpDebt: Double = 0
+
+    /// The most a single tick may advance the world. One second of driving is
+    /// about 13 m at 30 mph, which moves smoothly; three seconds is 40 m in a
+    /// single fix, which on somebody else's map is the dot teleporting.
+    private static let longestStep: Double = 1.2
+    /// How much owed time a tick may pay back on top of its own. A quarter
+    /// means catching up at 1.25x, which reads as traffic rather than as a
+    /// skip.
+    private static let catchUpRate: Double = 0.25
+    /// Past this the gap is not a stutter, it is the app having been away.
+    /// Trying to repay ten minutes would drive the rest of the route at double
+    /// speed, so anything beyond this is written off: the car simply took
+    /// longer than planned, which is the least visible way to be wrong.
+    private static let longestDebt: Double = 45
+
+    /// How far to move the world on this tick.
+    ///
+    /// Switching to another app and back was making the position jump along
+    /// the route. This is why: iOS stops delivering ticks while Cloak is not
+    /// frontmost, and the next tick used to hand the whole elapsed gap to the
+    /// motion engine in one go, up to three seconds of it, which the engine
+    /// applied as a single straight step. Every other app on the phone is
+    /// still being told the last position throughout that gap, so what they
+    /// see is the dot sitting still and then hopping forward, cutting the
+    /// corner it should have driven round.
+    ///
+    /// So a tick now advances at most `longestStep`, and the remainder is kept
+    /// as a debt repaid a little at a time over the ticks that follow. The car
+    /// ends up in the right place having driven every metre of the way there.
     private func elapsedSinceLastTick() -> Double {
         let now = ContinuousClock.now
         defer { lastTick = now }
         guard let lastTick else { return 1 }
         let seconds = Double((now - lastTick).components.seconds)
             + Double((now - lastTick).components.attoseconds) / 1e18
-        return min(max(seconds, 0.25), 3)
+        let real = max(seconds, 0.25)
+
+        let step = min(real, Self.longestStep)
+        catchUpDebt = min(Self.longestDebt, catchUpDebt + (real - step))
+
+        guard catchUpDebt > 0.01 else { return step }
+        let repay = min(catchUpDebt, step * Self.catchUpRate)
+        catchUpDebt -= repay
+        return step + repay
     }
 
     /// Timestamps of recent ticks, gaps between them and how long each push
@@ -311,6 +361,9 @@ actor SimulationEngine {
     private func tick() async {
         if paused {
             lastTick = nil
+            // Paused time is not owed. A car stopped on purpose does not have
+            // to make the time up afterwards.
+            catchUpDebt = 0
             persist()
             return
         }
@@ -364,7 +417,15 @@ actor SimulationEngine {
             snapshot.stopsMade = engine.state.stopsMade
             snapshot.remainingTime = engine.remainingTime
             snapshot.distanceRemaining = max(0, engine.profile.polyline.length - engine.state.distance)
-            snapshot.speedLimit = engine.profile.speed(at: engine.state.distance)
+            // `profile.speed(at:)` is the ceiling, and on a walking leg the
+            // ceiling is walking pace. Publishing that as a speed limit puts a
+            // 3 mph limit sign on screen for the last two hundred metres into
+            // an airport, so a walk reports no limit at all.
+            let modeHere = engine.profile.mode(at: engine.state.distance)
+            snapshot.travelMode = modeHere
+            snapshot.speedLimit = modeHere.isOnFoot
+                ? nil
+                : engine.profile.speed(at: engine.state.distance)
             if let next = engine.profile.stops.first(where: { $0.alongTrack > engine.state.distance }) {
                 snapshot.nextStopDistance = next.alongTrack - engine.state.distance
             } else {

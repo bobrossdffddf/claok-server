@@ -46,6 +46,12 @@ public extension Coordinate {
         return theta < 0 ? theta + 360 : theta
     }
 
+    /// Signed north offset from another point, in metres. For diagnostics and
+    /// realism tests.
+    func offsetNorth(from other: Coordinate) -> Double {
+        (latitude - other.latitude) * .pi / 180 * Coordinate.earthRadius
+    }
+
     func offset(metersNorth north: Double, metersEast east: Double) -> Coordinate {
         let dLat = north / Coordinate.earthRadius * 180 / .pi
         let dLon = east / (Coordinate.earthRadius * cos(latitude * .pi / 180)) * 180 / .pi
@@ -82,4 +88,8 @@ public extension Coordinate {
             longitude: longitude + (other.longitude - longitude) * t
         )
     }
+}
+
+extension Coordinate: Identifiable {
+    public var id: String { "\(latitude),\(longitude)" }
 }

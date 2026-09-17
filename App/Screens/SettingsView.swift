@@ -10,41 +10,52 @@ struct SettingsView: View {
     @State private var showsDiagnostics = false
     @State private var showsSigning = false
     @State private var showsPairing = false
+    @State private var showsCellular = false
+    @State private var showsExposure = false
+    @State private var showsPaywall = false
     @State private var confirmsReset = false
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: Metrics.loose) {
-                    if !model.canRunInBackground {
-                        backgroundWarning
-                    }
-
-                    statusSection
-                    tunnelSection
-                    safetySection
-                    speedHelpSection
-                    drivingSection
-                    licenseSection
-                    setupSection
-                    aboutSection
+            List {
+                // What used to float over the map as capsules. The map now
+                // shows only a red dot on the settings button, and this is
+                // where that dot leads.
+                if !AttentionItem.current(model: model).isEmpty {
+                    attentionSection
                 }
-                .padding(Metrics.card)
-                .padding(.bottom, 24)
+
+                if !model.canRunInBackground {
+                    backgroundSection
+                }
+
+                statusSection
+                tunnelSection
+                safetySection
+                speedHelpSection
+                drivingSection
+                licenseSection
+                setupSection
+                aboutSection
             }
-            .background(Palette.ground)
-            .scrollIndicators(.hidden)
+            .listStyle(.insetGrouped)
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }.tint(Palette.accent)
+                    Button("Done") { dismiss() }
                 }
             }
         }
+        .tint(Palette.accent)
         .preferredColorScheme(.dark)
         .sheet(isPresented: $showsDiagnostics) { DiagnosticsView() }
         .sheet(isPresented: $showsSigning) { SigningView() }
+        .sheet(isPresented: $showsCellular) { CellularView() }
+        .sheet(isPresented: $showsExposure) { ExposureView() }
+        // The map's own paywall sheet cannot present while Settings is itself
+        // a sheet, so Settings needs one of its own.
+        .sheet(isPresented: $showsPaywall) { PaywallView() }
         .sheet(isPresented: $showsPairing, onDismiss: { model.refreshPairingState() }) {
             PairWithoutComputerView()
         }
@@ -61,41 +72,74 @@ struct SettingsView: View {
 
     // MARK: - Sections
 
-    private var backgroundWarning: some View {
-        VStack(alignment: .leading, spacing: Metrics.snug) {
-            HStack(spacing: 10) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(Palette.warn)
-                Text("Simulation stops when you leave the app")
-                    .font(.label(15, weight: .semibold))
-                    .foregroundStyle(.white)
-            }
-            Text("iOS only keeps Cloak running in the background while location access is set to Always. It is currently \(authorizationName).")
-                .font(.label(13))
-                .foregroundStyle(Palette.dim)
-                .fixedSize(horizontal: false, vertical: true)
+    /// `Section` on its own is the app's hand-drawn card group from Theme, so
+    /// every section here names the system one explicitly.
+    private var backgroundSection: some View {
+        SwiftUI.Section {
+            SettingsLabel(
+                title: "Simulation stops when you leave the app",
+                subtitle: "Location access is \(authorizationName)",
+                symbol: "exclamationmark.triangle.fill",
+                symbolColor: Palette.warn)
+            .accessibilityElement(children: .combine)
 
-            Button("Open Location settings") { model.openLocationSettings() }
-                .buttonStyle(PrimaryButtonStyle(tint: Palette.warn))
+            Button {
+                model.openLocationSettings()
+            } label: {
+                Label("Open Location settings", systemImage: "arrow.up.forward.app")
+            }
+        } footer: {
+            Text("Without location access, iOS suspends Cloak the moment you switch apps and the drive stops. While Using the App is enough. It is currently \(authorizationName).")
         }
-        .padding(Metrics.regular)
-        .background(Palette.warn.opacity(0.10), in: .rect(cornerRadius: Metrics.cardRadius, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: Metrics.cardRadius, style: .continuous)
-                .strokeBorder(Palette.warn.opacity(0.35), lineWidth: 1)
-        )
+    }
+
+    private var attentionSection: some View {
+        SwiftUI.Section("Needs attention") {
+            ForEach(AttentionItem.current(model: model)) { item in
+                Button {
+                    switch item {
+                    case .link: showsDiagnostics = true
+                    case .cellular: showsCellular = true
+                    case .signing: showsSigning = true
+                    case .trial:
+                        TrialController.shared.paywallReason = nil
+                        showsPaywall = true
+                    }
+                } label: {
+                    HStack(spacing: 12) {
+                        Label {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(item.title)
+                                    .foregroundStyle(Color(.label))
+                                Text(item.detail)
+                                    .font(.subheadline)
+                                    .foregroundStyle(Color(.secondaryLabel))
+                                    .lineLimit(2)
+                            }
+                        } icon: {
+                            Image(systemName: item.symbol)
+                                .foregroundStyle(Palette.danger)
+                        }
+                        Spacer(minLength: 8)
+                        Image(systemName: "chevron.right")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(Color(.tertiaryLabel))
+                    }
+                }
+            }
+        }
     }
 
     private var statusSection: some View {
-        Section(title: "Status") {
-            Row(symbol: "link", title: "Pairing", subtitle: pairingDetail) {
-                StatusDot(ok: model.hasAnyPairing)
+        SwiftUI.Section("Status") {
+            SettingsRow(title: "Pairing", subtitle: pairingDetail, symbol: "link") {
+                StatusMark(ok: model.hasAnyPairing)
             }
-            Row(symbol: "externaldrive.fill", title: "Developer image", subtitle: DeveloperImageBundle.source) {
-                StatusDot(ok: model.hasDeveloperImage)
+            SettingsRow(title: "Developer image", subtitle: DeveloperImageBundle.source, symbol: "externaldrive.fill") {
+                StatusMark(ok: model.hasDeveloperImage)
             }
-            Row(symbol: "location.fill", title: "Location access", subtitle: authorizationName, showsDivider: false) {
-                StatusDot(ok: model.canRunInBackground, okTint: Palette.ok)
+            SettingsRow(title: "Location access", subtitle: authorizationName, symbol: "location.fill") {
+                StatusMark(ok: model.canRunInBackground)
             }
         }
     }
@@ -104,184 +148,190 @@ struct SettingsView: View {
         let provider = model.reflector.provider
         let up = model.reflector.isUp
 
-        return Section(
-            title: "Tunnel",
-            footer: provider == .localDevVPN
-                ? "iOS will not answer a connection this phone makes to itself. LocalDevVPN loops it back so it does. It carries no internet traffic and Cloak only asks it to switch on."
-                : "Cloak's own loopback tunnel. Nothing is proxied and no traffic leaves this phone."
-        ) {
-            Row(symbol: up ? "shield.lefthalf.filled" : "shield.slash",
+        return SwiftUI.Section {
+            SettingsRow(
                 title: provider == .localDevVPN ? "LocalDevVPN" : "Cloak's own tunnel",
                 subtitle: up ? "Running" : "Not running",
-                tint: up ? Palette.ok : Palette.warn,
-                showsDivider: provider == .localDevVPN || !up) {
-                StatusDot(ok: up)
+                symbol: up ? "shield.lefthalf.filled" : "shield.slash"
+            ) {
+                StatusMark(ok: up)
             }
 
             if provider == .localDevVPN {
                 if model.reflector.localDevVPNInstalled {
-                    ActionRow(symbol: "power", title: up ? "Restart the tunnel" : "Turn the tunnel on", showsDivider: false) {
+                    Button {
                         Task { _ = await model.ensureTunnelUp() }
+                    } label: {
+                        Label(up ? "Restart the tunnel" : "Turn the tunnel on", systemImage: "power")
                     }
                 } else {
-                    ActionRow(symbol: "arrow.down.app", title: "Get LocalDevVPN, free", tint: Palette.warn, showsDivider: false) {
+                    Button {
                         model.reflector.openAppStoreForLocalDevVPN()
+                    } label: {
+                        Label("Get LocalDevVPN, free", systemImage: "arrow.down.app")
                     }
                 }
             } else if !up {
-                ActionRow(symbol: "power", title: "Turn the tunnel on", showsDivider: false) {
+                Button {
                     Task { _ = await model.ensureTunnelUp() }
+                } label: {
+                    Label("Turn the tunnel on", systemImage: "power")
                 }
             }
+        } header: {
+            Text("Tunnel")
+        } footer: {
+            Text(provider == .localDevVPN
+                 ? "iOS will not answer a connection this phone makes to itself. LocalDevVPN loops it back so it does. It carries no internet traffic and Cloak only asks it to switch on."
+                 : "Cloak's own loopback tunnel. Nothing is proxied and no traffic leaves this phone.")
         }
     }
 
     private var safetySection: some View {
-        Section(
-            title: "Safety",
-            footer: "Peeking clears the simulation for about two seconds, because iOS hands Cloak the same fake fix it gives every other app."
-        ) {
-            Row(symbol: "shield.lefthalf.filled", title: "Geofence guard", subtitle: "Stops if your real position leaves the area") {
-                Toggle("", isOn: Binding(
-                    get: { model.geofence.isEnabled },
-                    set: { model.setGeofenceEnabled($0) }
-                ))
-                .labelsHidden()
-                .tint(Palette.accent)
+        SwiftUI.Section {
+            Toggle(isOn: Binding(
+                get: { model.geofence.isEnabled },
+                set: { model.setGeofenceEnabled($0) }
+            )) {
+                SettingsLabel(
+                    title: "Geofence guard",
+                    subtitle: "Stops if your real position leaves the area",
+                    symbol: "shield.lefthalf.filled")
             }
 
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Text("Radius").font(.label(14)).foregroundStyle(.white)
-                    Spacer()
-                    Text("\(Int(model.geofence.radius / 1000)) km")
-                        .font(.readout(13))
-                        .foregroundStyle(Palette.accent)
+            VStack(alignment: .leading, spacing: 4) {
+                LabeledContent {
+                    Text(Units.distance(model.geofence.radius))
+                        .monospacedDigit()
+                } label: {
+                    Label("Radius", systemImage: "circle.dashed")
+                        .labelStyle(SettingsIconLabelStyle())
                 }
                 Slider(
                     value: Binding(get: { model.geofence.radius }, set: { model.geofence.radius = $0 }),
                     in: 1000...200_000,
                     step: 1000
                 )
-                .tint(Palette.accent)
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-            .overlay(alignment: .bottom) {
-                Rectangle().fill(Palette.hairline.opacity(0.5)).frame(height: 0.5).padding(.leading, 14)
+                .accessibilityLabel("Geofence radius")
+                .accessibilityValue(Units.distance(model.geofence.radius))
             }
 
-            ActionRow(symbol: "scope", title: "Centre it where I am") {
+            Button {
                 model.saveGeofenceHere()
+            } label: {
+                Label("Centre it where I am", systemImage: "scope")
             }
 
-            ActionRow(
-                symbol: "eye",
-                title: model.isPeeking ? "Peeking" : "Peek at my real location",
-                showsDivider: false
-            ) {
+            Button {
                 Task { await model.peekRealLocation() }
+            } label: {
+                Label(model.isPeeking ? "Peeking" : "Peek at my real location", systemImage: "eye")
+                    .modifier(ActionRowStyle())
             }
             .disabled(model.isPeeking)
+        } header: {
+            Text("Safety")
+        } footer: {
+            Text("Peeking clears the simulation for about two seconds, because iOS hands Cloak the same fake fix it gives every other app.")
         }
     }
 
     private var speedHelpSection: some View {
-        Section(
-            title: "Speed help",
-            footer: "Sets how fast a simulated drive goes against the speed limit of each road it passes along, adjusting as the limits change. It shapes the drive Cloak plays back and does not read how the phone is really moving."
-        ) {
-            VStack(alignment: .leading, spacing: 14) {
-                Toggle(isOn: Binding(
-                    get: { model.speedHelp.isEnabled },
-                    set: { model.setSpeedHelp(model.speedHelp.with(isEnabled: $0)) }
+        SwiftUI.Section {
+            Toggle(isOn: Binding(
+                get: { model.speedHelp.isEnabled },
+                set: { model.setSpeedHelp(model.speedHelp.with(isEnabled: $0)) }
+            )) {
+                SettingsLabel(title: "Speed help", subtitle: model.speedHelp.summary, symbol: "gauge.with.dots.needle.33percent")
+            }
+
+            if model.speedHelp.isEnabled {
+                Picker("Mode", selection: Binding(
+                    get: { model.speedHelp.mode },
+                    set: { model.setSpeedHelp(model.speedHelp.with(mode: $0)) }
                 )) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Speed help").font(.label(14)).foregroundStyle(.white)
-                        Text(model.speedHelp.summary)
-                            .font(.label(12))
-                            .foregroundStyle(model.speedHelp.isEnabled ? Palette.accent : Palette.dim)
-                    }
+                    Text("Auto").tag(SpeedHelp.Mode.auto)
+                    Text("Manual").tag(SpeedHelp.Mode.manual)
                 }
-                .tint(Palette.accent)
+                .pickerStyle(.segmented)
+                .labelsHidden()
 
-                if model.speedHelp.isEnabled {
-                    Picker("", selection: Binding(
-                        get: { model.speedHelp.mode },
-                        set: { model.setSpeedHelp(model.speedHelp.with(mode: $0)) }
-                    )) {
-                        Text("Auto").tag(SpeedHelp.Mode.auto)
-                        Text("Manual").tag(SpeedHelp.Mode.manual)
-                    }
-                    .pickerStyle(.segmented)
-
-                    switch model.speedHelp.mode {
-                    case .auto:
-                        VStack(alignment: .leading, spacing: 8) {
-                            ForEach(SpeedHelp.Profile.allCases) { profile in
-                                Button {
-                                    model.setSpeedHelp(model.speedHelp.with(profile: profile))
-                                } label: {
-                                    HStack(alignment: .top, spacing: 10) {
-                                        Image(systemName: model.speedHelp.profile == profile
-                                              ? "largecircle.fill.circle" : "circle")
-                                            .font(.system(.callout))
-                                            .foregroundStyle(model.speedHelp.profile == profile
-                                                             ? Palette.accent : Palette.dim)
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text(profile.name)
-                                                .font(.label(14, weight: .medium))
-                                                .foregroundStyle(.white)
-                                            Text(profile.detail)
-                                                .font(.label(12))
-                                                .foregroundStyle(Palette.dim)
-                                        }
-                                        Spacer(minLength: 0)
-                                    }
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-
-                    case .manual:
-                        VStack(alignment: .leading, spacing: 6) {
+                switch model.speedHelp.mode {
+                case .auto:
+                    ForEach(SpeedHelp.Profile.allCases) { profile in
+                        let selected = model.speedHelp.profile == profile
+                        Button {
+                            model.setSpeedHelp(model.speedHelp.with(profile: profile))
+                        } label: {
                             HStack {
-                                Text("Never above").font(.label(14)).foregroundStyle(.white)
-                                Spacer()
-                                Text("\(Int(model.speedHelp.manualMaxMph.rounded())) mph")
-                                    .font(.readout(13))
-                                    .foregroundStyle(Palette.accent)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(profile.name)
+                                        .foregroundStyle(Color(.label))
+                                    Text(profile.detail)
+                                        .font(.subheadline)
+                                        .foregroundStyle(Color(.secondaryLabel))
+                                }
+                                Spacer(minLength: 8)
+                                if selected {
+                                    Image(systemName: "checkmark")
+                                        .fontWeight(.semibold)
+                                        .foregroundStyle(.tint)
+                                }
                             }
-                            Slider(
-                                value: Binding(
-                                    get: { model.speedHelp.manualMaxMph },
-                                    set: { model.setSpeedHelp(model.speedHelp.with(manualMaxMph: $0)) }
-                                ),
-                                in: 15...85,
-                                step: 5
-                            )
-                            .tint(Palette.accent)
-                            Text("The road still applies. A 30 limit stays a 30 limit.")
-                                .font(.label(12))
-                                .foregroundStyle(Palette.dim)
+                            .contentShape(.rect)
                         }
+                        .accessibilityAddTraits(selected ? .isSelected : [])
+                    }
+
+                case .manual:
+                    VStack(alignment: .leading, spacing: 4) {
+                        LabeledContent {
+                            Text("\(Int(model.speedHelp.manualMaxMph.rounded())) mph")
+                                .monospacedDigit()
+                        } label: {
+                            Label("Never above", systemImage: "speedometer")
+                                .labelStyle(SettingsIconLabelStyle())
+                        }
+                        Slider(
+                            value: Binding(
+                                get: { model.speedHelp.manualMaxMph },
+                                set: { model.setSpeedHelp(model.speedHelp.with(manualMaxMph: $0)) }
+                            ),
+                            in: 15...85,
+                            step: 5
+                        )
+                        .accessibilityLabel("Never above")
+                        .accessibilityValue("\(Int(model.speedHelp.manualMaxMph.rounded())) miles per hour")
+                        Text("The road still applies. A 30 limit stays a 30 limit.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
                     }
                 }
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
+        } footer: {
+            Text("Sets how fast a simulated drive goes against the speed limit of each road it passes along, adjusting as the limits change. It shapes the drive Cloak plays back and does not read how the phone is really moving.")
         }
     }
 
     private var drivingSection: some View {
-        Section(title: "Driving", footer: "Auto stop ends a simulation on its own, so a drive left running does not carry on all day.") {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Text("Auto stop").font(.label(14)).foregroundStyle(.white)
-                    Spacer()
+        SwiftUI.Section {
+            Toggle(isOn: Binding(
+                get: { model.pauseWhenCoverBreaks },
+                set: { model.pauseWhenCoverBreaks = $0 }
+            )) {
+                SettingsLabel(
+                    title: "Pause when cover breaks",
+                    subtitle: model.pauseWhenCoverBreaks ? "Pauses if your connection stops matching the pin" : "Keeps reporting even when exposed",
+                    symbol: "pause.circle")
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                LabeledContent {
                     Text(model.autoStopMinutes == 0 ? "Off" : "\(model.autoStopMinutes) min")
-                        .font(.readout(13))
-                        .foregroundStyle(model.autoStopMinutes == 0 ? Palette.dim : Palette.accent)
+                        .monospacedDigit()
+                } label: {
+                    Label("Auto stop", systemImage: "timer")
+                        .labelStyle(SettingsIconLabelStyle())
                 }
                 Slider(
                     value: Binding(
@@ -291,70 +341,77 @@ struct SettingsView: View {
                     in: 0...180,
                     step: 15
                 )
-                .tint(Palette.accent)
+                .accessibilityLabel("Auto stop")
+                .accessibilityValue(model.autoStopMinutes == 0 ? "Off" : "\(model.autoStopMinutes) minutes")
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-        }
-    }
-
-    private var setupSection: some View {
-        Section(title: "Setup") {
-            ActionRow(
-                symbol: "sparkles",
-                title: "Run setup again",
-                subtitle: "Walk through Developer Mode, pairing and the tunnel"
-            ) {
-                confirmsReset = true
-            }
-
-            ActionRow(
-                symbol: "signature",
-                title: "Signing",
-                subtitle: signingSubtitle
-            ) {
-                showsSigning = true
-            }
-
-            ActionRow(
-                symbol: "iphone.radiowaves.left.and.right",
-                title: "Pairing",
-                subtitle: model.hasAnyPairing ? "Paired with this phone" : "Not paired yet"
-            ) {
-                showsPairing = true
-            }
-
-            ActionRow(
-                symbol: "stethoscope",
-                title: "Diagnostics",
-                subtitle: "See every step of the chain",
-                showsDivider: false
-            ) {
-                showsDiagnostics = true
-            }
+        } header: {
+            Text("Driving")
+        } footer: {
+            Text("Auto stop ends a simulation on its own, so a drive left running does not carry on all day. Pause on cover break stops reporting the moment your connection no longer matches the pin, which is what happens when a VPN drops.")
         }
     }
 
     @ViewBuilder
     private var licenseSection: some View {
         if licensing.isEnforced {
-            Section(
-                title: "Licence",
-                footer: "One licence covers one phone. Releasing it here frees it for another, and Cloak locks until a licence is entered again."
-            ) {
-                Row(symbol: "key.fill",
-                    title: "Licence",
-                    subtitle: licenseDetail,
-                    tint: licensing.isUnlocked ? Palette.ok : Palette.warn) {
-                    StatusDot(ok: licensing.isUnlocked)
+            SwiftUI.Section {
+                SettingsRow(title: "Licence", subtitle: licenseDetail, symbol: "key.fill") {
+                    StatusMark(ok: licensing.isUnlocked)
                 }
 
-                ActionRow(symbol: "arrow.up.right.square",
-                          title: "Release this phone",
-                          tint: Palette.warn,
-                          showsDivider: false) {
+                Button(role: .destructive) {
                     Task { await licensing.release() }
+                } label: {
+                    Label("Release this phone", systemImage: "arrow.up.right.square")
                 }
+            } header: {
+                Text("Licence")
+            } footer: {
+                Text("One licence covers one phone. Releasing it here frees it for another, and Cloak locks until a licence is entered again.")
+            }
+        }
+    }
+
+    private var setupSection: some View {
+        Group {
+            SwiftUI.Section("Setup") {
+                SheetRow(title: "Signing", subtitle: signingSubtitle, symbol: "signature") {
+                    showsSigning = true
+                }
+                SheetRow(
+                    title: "Pairing",
+                    subtitle: model.hasAnyPairing ? "Paired with this phone" : "Not paired yet",
+                    symbol: "iphone.radiowaves.left.and.right"
+                ) {
+                    showsPairing = true
+                }
+                SheetRow(
+                    title: "Cellular",
+                    subtitle: CellularAssist.shared.learned.map { "Relinks with: \($0.title)" } ?? "Set up linking away from Wi-Fi",
+                    symbol: "antenna.radiowaves.left.and.right"
+                ) {
+                    showsCellular = true
+                }
+                SheetRow(
+                    title: "Exposure",
+                    subtitle: "Where your connection comes out, your clock, your motion",
+                    symbol: "eye.slash"
+                ) {
+                    showsExposure = true
+                }
+                SheetRow(title: "Diagnostics", subtitle: "See every step of the chain", symbol: "stethoscope") {
+                    showsDiagnostics = true
+                }
+            }
+
+            SwiftUI.Section {
+                Button {
+                    confirmsReset = true
+                } label: {
+                    Label("Run setup again", systemImage: "sparkles")
+                }
+            } footer: {
+                Text("Walk through Developer Mode, pairing and the tunnel.")
             }
         }
     }
@@ -371,10 +428,12 @@ struct SettingsView: View {
     }
 
     private var aboutSection: some View {
-        Section(title: "About", footer: "Nothing leaves this phone. No account, no analytics, no servers.") {
-            Row(symbol: "number", title: "Version", subtitle: versionText, showsDivider: false) {
-                EmptyView()
-            }
+        SwiftUI.Section {
+            LabeledContent("Version", value: versionText)
+        } header: {
+            Text("About")
+        } footer: {
+            Text("Nothing leaves this phone. No account, no analytics, no servers.")
         }
     }
 
@@ -401,5 +460,120 @@ struct SettingsView: View {
         let short = info?["CFBundleShortVersionString"] as? String ?? "1.0"
         let build = info?["CFBundleVersion"] as? String ?? "0"
         return "\(short) (\(build))"
+    }
+}
+
+// MARK: - Rows
+
+/// Title over a one line subtitle, with an optional leading symbol in the
+/// accent colour. Plain text styles, so the row sizes with Dynamic Type.
+private struct SettingsLabel: View {
+    let title: String
+    var subtitle: String?
+    var symbol: String?
+    /// A status colour for the symbol, when the row is a warning. Otherwise
+    /// the symbol takes the accent.
+    var symbolColor: Color?
+
+    var body: some View {
+        if let symbol {
+            Label {
+                text
+            } icon: {
+                Image(systemName: symbol)
+                    .foregroundStyle(symbolColor.map(AnyShapeStyle.init) ?? AnyShapeStyle(.tint))
+            }
+        } else {
+            text
+        }
+    }
+
+    /// The label colours are named outright rather than `.primary` and
+    /// `.secondary`: inside a list button those hierarchical styles resolve
+    /// against the button's tint, which turns a whole navigation row teal.
+    private var text: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .foregroundStyle(Color(.label))
+            if let subtitle {
+                Text(subtitle)
+                    .font(.subheadline)
+                    .foregroundStyle(Color(.secondaryLabel))
+            }
+        }
+    }
+}
+
+/// A read-only row: label on the left, a status accessory on the right.
+private struct SettingsRow<Accessory: View>: View {
+    let title: String
+    var subtitle: String?
+    var symbol: String?
+    @ViewBuilder var accessory: Accessory
+
+    var body: some View {
+        HStack(spacing: 12) {
+            SettingsLabel(title: title, subtitle: subtitle, symbol: symbol)
+            Spacer(minLength: 8)
+            accessory
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// A row that opens another screen as a sheet. It reads like a navigation row
+/// because that is what it is to the person tapping it.
+private struct SheetRow: View {
+    let title: String
+    var subtitle: String?
+    let symbol: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                SettingsLabel(title: title, subtitle: subtitle, symbol: symbol)
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(Color(.tertiaryLabel))
+            }
+            .contentShape(.rect)
+        }
+    }
+}
+
+/// Keeps a plain `Label` icon in the accent colour inside `LabeledContent`.
+private struct SettingsIconLabelStyle: LabelStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Label {
+            configuration.title
+                .foregroundStyle(.primary)
+        } icon: {
+            configuration.icon
+                .foregroundStyle(.tint)
+        }
+    }
+}
+
+/// Ready or not, as a system symbol. Shape as well as colour.
+private struct StatusMark: View {
+    let ok: Bool
+
+    var body: some View {
+        Image(systemName: ok ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+            .foregroundStyle(ok ? Palette.ok : Palette.warn)
+            .accessibilityLabel(ok ? "Ready" : "Needs attention")
+    }
+}
+
+/// A list action's label that greys out when the action is unavailable. Left
+/// to itself a disabled list button kept a white title beside a teal glyph,
+/// which reads as a live row.
+private struct ActionRowStyle: ViewModifier {
+    @Environment(\.isEnabled) private var isEnabled
+
+    func body(content: Content) -> some View {
+        content.foregroundStyle(isEnabled ? AnyShapeStyle(.tint) : AnyShapeStyle(Color(.tertiaryLabel)))
     }
 }

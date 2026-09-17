@@ -228,12 +228,22 @@ impl Application {
             }
         }
 
+        let registered_any = !app_ids_to_register.is_empty();
         for bundle in app_ids_to_register {
             let id = bundle.bundle_identifier().unwrap_or("");
             let name = bundle.bundle_name().unwrap_or("");
             dev_session.add_app_id(team, name, id, None).await?;
         }
-        let list_app_id_response = dev_session.list_app_ids(team, None).await?;
+        // Asking Apple again only tells us something if something was actually
+        // added. On a renewal every app ID already exists, nothing above sent a
+        // mutating request, and so the second listing is the first listing -
+        // bought with another round trip and, since idle connections are not
+        // pooled here, another TLS handshake.
+        let list_app_id_response = if registered_any {
+            dev_session.list_app_ids(team, None).await?
+        } else {
+            list_app_ids_response
+        };
         let app_ids: Vec<_> = list_app_id_response
             .app_ids
             .into_iter()

@@ -31,6 +31,10 @@ pub enum Command {
     /// The six digit code the phone shows during remote pairing.
     PairingPin(String),
     OpenLocalDevVPN,
+    /// Work out why a phone will not talk, and report it verbatim.
+    Diagnose,
+    /// Look again, ignoring anything remembered from the last look.
+    Rescan,
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +56,8 @@ pub enum Event {
     Rebooting,
     Installed,
     Failed(String),
+    /// The doctor's report, for the screen to show as-is.
+    Diagnosis(String),
 }
 
 pub struct Channels {
@@ -77,6 +83,29 @@ pub fn spawn(ipa: PathBuf) -> Channels {
 
 type Events = UnboundedSender<Event>;
 
+/// One look for phones. Kept in one place because it is now driven both by a
+/// timer and by hand.
+async fn scan(events: &Events) {
+    if !device::usbmuxd_available().await {
+        let _ = events.send(Event::DriverMissing);
+        return;
+    }
+    match device::list_phones().await {
+        Ok(phones) => {
+            // Ask for the switch straight away rather than waiting for
+            // somebody to press a button for it. iOS hides the Developer Mode
+            // row until a developer tool asks, so telling people to go and
+            // find it before asking is telling them to look at something that
+            // is not there. Revealing an already visible switch does nothing.
+            if reveal_where_needed(&phones).await {
+                let _ = events.send(Event::DeveloperModeRevealed);
+            }
+            let _ = events.send(Event::Phones(phones));
+        }
+        Err(message) => { let _ = events.send(Event::Failed(message)); }
+    }
+}
+
 async fn run(mut commands: UnboundedReceiver<Command>, events: Events, ipa: PathBuf) {
     // The two-factor code arrives from the window long after the login call
     // has gone to sleep waiting for it, so it needs a channel of its own.
@@ -95,27 +124,12 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: Events, ipa: Path
                 let _ = pin_tx.send(pin);
             }
 
-            Command::Scan => {
-                if !device::usbmuxd_available().await {
-                    let _ = events.send(Event::DriverMissing);
-                    continue;
-                }
-                match device::list_phones().await {
-                    Ok(phones) => {
-                        // Ask for the switch straight away rather than waiting
-                        // for somebody to press a button for it. iOS hides the
-                        // Developer Mode row until a developer tool asks, so
-                        // telling people to go and find it before asking is
-                        // telling them to look at something that is not there.
-                        // Revealing an already visible switch does nothing.
-                        if reveal_where_needed(&phones).await {
-                            let _ = events.send(Event::DeveloperModeRevealed);
-                        }
-                        let _ = events.send(Event::Phones(phones));
-                    }
-                    Err(message) => { let _ = events.send(Event::Failed(message)); }
-                }
+            Command::Rescan => {
+                device::forget_phones();
+                scan(&events).await;
             }
+
+            Command::Scan => scan(&events).await,
 
             Command::RevealDeveloperMode { udid } => {
                 let _ = events.send(Event::Status("Asking iOS to show the Developer Mode switch…".into()));
@@ -131,6 +145,16 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: Events, ipa: Path
             Command::EnableDeveloperMode { udid } => {
                 let events = events.clone();
                 tokio::spawn(async move { enable_developer_mode(&udid, &events).await });
+            }
+
+            Command::Diagnose => {
+                let events = events.clone();
+                tokio::spawn(async move {
+                    let _ = events.send(Event::Status("Working out what is wrong".into()));
+                    let report = device::doctor().await;
+                    let _ = events.send(Event::Diagnosis(report));
+                    let _ = events.send(Event::Status(String::new()));
+                });
             }
 
             Command::OpenLocalDevVPN => {
@@ -170,8 +194,12 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: Events, ipa: Path
 async fn reveal_where_needed(phones: &[device::Phone]) -> bool {
     let mut revealed = false;
     for phone in phones {
+        if phone.via_apple_tooling {
+            tracing::info!("skipping reveal on {}: this Mac only lets Apple's own tooling talk to it", phone.name);
+            continue;
+        }
         if !phone.trusted {
-            tracing::info!("skipping reveal, {} has not trusted this computer", phone.name);
+            tracing::info!("skipping reveal, {} could not be read ({:?})", phone.name, phone.problem);
             continue;
         }
         if developer_mode_ok(phone) {
@@ -302,6 +330,14 @@ async fn install(
     // was never going to work reads as though the password was wrong.
     if let Err(detail) = apple_reachable().await {
         tracing::warn!("cannot reach Apple: {detail}");
+        if detail.starts_with("FLAKY") {
+            let through = tunnel_in_the_way()
+                .map(|name| format!("\n\nEverything on this computer is going through {name} right now, which is where to look first."))
+                .unwrap_or_default();
+            return Err(format!(
+                "The connection to Apple is dropping requests.\n\nCloak asked Apple the same harmless question three times before touching your password, and some of them never came back. Signing in is a dozen requests in a row, so it would fail part way through and look like Apple refusing the account.{through}\n\nFix the connection first, then sign in. Sharing your phone's internet connection is the quickest way to rule it out.\n\nDetail: {detail}"
+            ));
+        }
         return Err(unreachable_message_for(&detail));
     }
 
@@ -345,6 +381,16 @@ async fn install(
     // attempt Apple is counting, and only a handful of those are ever safe.
     let mut apple_attempts = 0;
 
+    // Dropped connections are counted apart again. They are free against the
+    // account and they often clear by themselves, so they are worth a couple
+    // of goes, but not an unbounded number on a line that is simply down.
+    let mut transport_failures = 0;
+
+    // Identities Apple would not verify. Each one is a fresh provisioning
+    // against a different helper rather than another go at the same thing, so
+    // these are worth working through, but not forever.
+    let mut stale_identities = 0;
+
     for (index, helper) in helpers.iter().enumerate() {
         if apple_attempts >= 3 {
             tracing::warn!("stopping after {apple_attempts} attempts that reached Apple");
@@ -358,12 +404,18 @@ async fn install(
         }
         tracing::info!("trying sign-in helper {helper}");
 
+        // Set the moment Apple asks for the code, so the reassurance ticker
+        // below stops talking over the code prompt.
+        let asked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
         let two_factor = {
             let events = events.clone();
             let code_rx = code_rx.clone();
+            let asked = asked.clone();
             move |params: TwoFactorCallbackParams| {
                 let events = events.clone();
                 let code_rx = code_rx.clone();
+                asked.store(true, std::sync::atomic::Ordering::Relaxed);
                 async move {
                     let mut guard = code_rx.lock().await;
                     while guard.try_recv().is_ok() {}
@@ -376,10 +428,16 @@ async fn install(
             }
         };
 
+        // The identity blob is filed under this helper and nobody else, and an
+        // old one is dropped before it can be sent. Sending a blob one server
+        // minted to a different server is what Apple answers -22421 to.
+        let store = crate::state::FileStorage::for_helper(helper);
+        store.drop_stale_anisette(std::time::Duration::from_secs(12 * 60 * 60));
+
         let provider = RemoteV3AnisetteProvider::default()
             .map_err(|e| format!("Could not start the Apple sign-in helper: {e}"))?
             .set_url(helper)
-            .set_storage(Box::new(crate::state::FileStorage::new()))
+            .set_storage(Box::new(crate::state::FileStorage::for_helper(helper)))
             .set_serial_number(
                 config
                     .anisette_serial
@@ -388,6 +446,32 @@ async fn install(
             );
 
         let anisette = crate::anisette::Identified::new(provider, identity.clone());
+
+        // Signing in is a dozen requests in a row and Apple is slow to answer
+        // some of them, so this stretch can run the better part of a minute
+        // with nothing to show for it. A screen that has said the same four
+        // words for fifty seconds reads as a hang, so say what is happening.
+        let heartbeat = {
+            let events = events.clone();
+            let asked = asked.clone();
+            tokio::spawn(async move {
+                for note in [
+                    (8, "Proving this Mac to Apple"),
+                    (20, "Waiting on Apple. This part is slow"),
+                    (40, "Still waiting on Apple. It has not failed"),
+                    (70, "Apple is taking longer than usual to answer"),
+                ] {
+                    tokio::time::sleep(std::time::Duration::from_secs(note.0)).await;
+                    if asked.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
+                    if events.send(Event::Status(note.1.to_string())).is_err() {
+                        return;
+                    }
+                }
+            })
+        };
+        let _heartbeat = crate::worker::StopOnDrop(heartbeat);
 
         // No time limit on the login as a whole, because a person may take
         // minutes to find the code on another device.
@@ -414,8 +498,27 @@ async fn install(
                 // are volunteer boxes and a bad minute is not a dead server.
                 if crate::anisette::helper_broke(&text, helper) {
                     tracing::warn!("{helper} failed to produce an identity, moving on");
-                    crate::state::FileStorage::new().forget_anisette();
+                    store.forget_anisette();
                     continue;
+                }
+
+                // Apple would not verify the one-time code the identity
+                // produced. The password was never looked at, so this costs
+                // the account nothing. Throw that identity away and go to the
+                // next helper, which now provisions from scratch because its
+                // state is kept separately.
+                if crate::anisette::stale_session(&text) {
+                    apple_attempts += 1;
+                    stale_identities += 1;
+                    tracing::warn!("{helper} produced an identity Apple would not verify");
+                    store.forget_anisette();
+                    if stale_identities <= 2 && index + 1 < helpers.len() {
+                        let _ = events.send(Event::Status(
+                            "Apple would not accept that identity. Making a fresh one".to_string(),
+                        ));
+                        continue;
+                    }
+                    return Err(crate::anisette::stale_session_message());
                 }
 
                 // A throttle is about how fast requests are arriving, not about
@@ -436,8 +539,28 @@ async fn install(
                     apple_attempts += 1;
                     tracing::warn!("Apple would not accept the identity from {helper}, moving on");
                     crate::anisette::remember_rejected(helper);
-                    crate::state::FileStorage::new().forget_anisette();
+                    store.forget_anisette();
                     continue;
+                }
+
+                // A failure that never reached Apple is not an attempt Apple
+                // is counting, and it is not this helper's fault either. It is
+                // also the one kind that often comes right on its own, because
+                // a route that drops one request in five will carry the next.
+                // So it gets another go on a different helper before it is
+                // reported, which costs the account nothing.
+                if looks_like_transport(&text) {
+                    transport_failures += 1;
+                    if transport_failures <= 2 && index + 1 < helpers.len() {
+                        tracing::warn!("the request never completed ({text}); trying again");
+                        let _ = events.send(Event::Status(
+                            "The connection dropped that request. Trying again".to_string(),
+                        ));
+                        store.forget_anisette();
+                        continue;
+                    }
+                    tracing::error!("the request to Apple never completed: {text}");
+                    return Err(friendly_login_error(&text));
                 }
 
                 apple_attempts += 1;
@@ -446,7 +569,7 @@ async fn install(
                 // another server would only spend an attempt Apple is counting.
                 tracing::error!("sign-in failed on helper {helper}: {text}");
                 if looks_rate_limited(&text) {
-                    crate::state::FileStorage::new().forget_anisette();
+                    store.forget_anisette();
                 }
                 // A saved password Apple has just rejected is worse than none,
                 // because it would be offered again silently on the next run.
@@ -460,6 +583,11 @@ async fn install(
 
     let Some(mut account) = account else {
         tracing::error!("every helper refused: {last_error}");
+        // Ran out of helpers while the connection was the thing failing. That
+        // is not Apple refusing anything and must not be reported as if it is.
+        if transport_failures > 0 && looks_like_transport(&last_error) {
+            return Err(friendly_login_error(&last_error));
+        }
         return Err(crate::anisette::all_helpers_rejected());
     };
 
@@ -467,7 +595,25 @@ async fn install(
         let _ = StoredPassword::save(apple_id, password);
     }
 
-    let provider = device::provider_for(udid).await?;
+    // On macOS 26 and later this can fail outright while the phone is
+    // perfectly healthy, because Apple's device daemon refuses to carry
+    // anything that is not its own. Signing needs no device at all, so a
+    // missing provider is not fatal: the install goes through Apple's tool
+    // instead, at the end.
+    let provider = match device::provider_for(udid).await {
+        Ok(provider) => Some(provider),
+        Err(reason) => {
+            if device::apple_view(udid).is_some_and(|view| view.paired) {
+                tracing::warn!("no provider ({reason}); going through Apple's tooling instead");
+                let _ = events.send(Event::Status(
+                    "This Mac will not let anything but Apple talk to the phone. Using Apple's own tool instead".to_string(),
+                ));
+                None
+            } else {
+                return Err(reason);
+            }
+        }
+    };
 
     // The pairing record goes inside the app, before it is signed.
     //
@@ -483,8 +629,18 @@ async fn install(
     // this direction of pairing, so it is skipped there and the app pairs
     // outward on its own.
     let remote_record: Option<String> = {
-        let major = device::ios_major(&provider).await.unwrap_or(0);
-        let name = device::device_name(&provider).await.unwrap_or_else(|| "iPhone".to_string());
+        let apple = device::apple_view(udid);
+        let major = match &provider {
+            Some(provider) => device::ios_major(provider).await.unwrap_or(0),
+            None => apple
+                .as_ref()
+                .and_then(|view| view.ios_version.split('.').next().and_then(|p| p.parse().ok()))
+                .unwrap_or(0),
+        };
+        let name = match &provider {
+            Some(provider) => device::device_name(provider).await.unwrap_or_else(|| "iPhone".to_string()),
+            None => apple.as_ref().map(|view| view.name.clone()).unwrap_or_else(|| "iPhone".to_string()),
+        };
         if major >= 27 {
             None
         } else {
@@ -515,10 +671,15 @@ async fn install(
         match isideload::sideload::cert_identity::CertificateIdentity::ensure_private_key(apple_id, &storage).await {
             Ok((key_name, der)) => {
                 use base64::Engine;
+                let saved = Config::load();
+                let anisette_state = isideload::util::storage::SideloadingStorage::retrieve(&storage, "anisette_state").ok().flatten();
                 Some(serde_json::json!({
                     "key": key_name,
                     "der": base64::engine::general_purpose::STANDARD.encode(der),
                     "machine": machine_name(),
+                    "anisette_state": anisette_state,
+                    "anisette_url": saved.anisette_last_good,
+                    "anisette_serial": saved.anisette_serial.unwrap_or_else(|| "0".to_string()),
                 }).to_string())
             }
             Err(error) => {
@@ -529,7 +690,16 @@ async fn install(
     };
 
     let mut record_bundled = false;
-    let ipa = match handoff::pairing_record(&provider).await {
+    let pairing_bytes = match &provider {
+        Some(provider) => handoff::pairing_record(provider).await,
+        // usbmuxd still hands over the record even where it refuses to carry
+        // a connection, so this is worth asking for on its own.
+        None => match device::muxd_provider_for(udid).await {
+            Ok(muxd) => handoff::pairing_record(&muxd).await,
+            Err(reason) => Err(reason),
+        },
+    };
+    let ipa = match pairing_bytes {
         Ok(record) => {
             let bundled = std::env::temp_dir().join("Cloak-paired.ipa");
             match handoff::bundle_pairing_record(ipa, &record, remote_record.as_deref(), signing_identity.as_deref(), &bundled) {
@@ -574,13 +744,7 @@ async fn install(
 
         step(0.18, "Opening your developer account");
 
-        let session = tokio::time::timeout(
-            std::time::Duration::from_secs(90),
-            DeveloperSession::from_account(&mut account),
-        )
-        .await
-        .map_err(|_| "Apple stopped answering while opening your developer account. Check the connection and try again.".to_string())?
-        .map_err(|e| format!("Apple would not open a developer session: {e}"))?;
+        let session = open_developer_session(&mut account, &events).await?;
 
         let mut sideloader = SideloaderBuilder::new(session, apple_id.to_string())
             .team_selection(TeamSelection::First)
@@ -591,10 +755,46 @@ async fn install(
 
         step(0.24, "Registering this iPhone with Apple");
 
-        let team = sideloader
-            .get_team()
-            .await
-            .map_err(|e| format!("Apple would not say which developer team you are on: {e}"))?;
+        // Same rule as the step above: a dropped request is worth another go,
+        // an answer from Apple is final.
+        let team = {
+            let mut got = None;
+            let mut last = String::new();
+            for attempt in 1..=3u32 {
+                if attempt > 1 {
+                    let _ = events.send(Event::Status(
+                        "The connection dropped that request. Trying again".to_string(),
+                    ));
+                    tokio::time::sleep(std::time::Duration::from_secs(2 * attempt as u64)).await;
+                }
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(45),
+                    sideloader.get_team(),
+                )
+                .await
+                {
+                    Ok(Ok(team)) => {
+                        got = Some(team);
+                        break;
+                    }
+                    Ok(Err(error)) => {
+                        let text = error.to_string();
+                        if !looks_like_transport(&text) {
+                            return Err(format!(
+                                "Apple would not say which developer team you are on: {text}"
+                            ));
+                        }
+                        last = text;
+                    }
+                    Err(_) => last = "the request to Apple timed out".to_string(),
+                }
+                tracing::warn!("team lookup attempt {attempt} did not complete: {last}");
+            }
+            match got {
+                Some(team) => team,
+                None => return Err(friendly_login_error(&last)),
+            }
+        };
 
         // On a second go, clear Apple's side out before trying again. The
         // signing library asks for the certificate list once and then revokes
@@ -607,13 +807,22 @@ async fn install(
             cleared = Some(count);
         }
 
-        let info = IdeviceInfo::from_device(&provider)
-            .await
-            .map_err(|e| format!("Could not read the iPhone's name: {e}"))?;
+        let (device_name, device_udid) = match &provider {
+            Some(provider) => {
+                let info = IdeviceInfo::from_device(provider)
+                    .await
+                    .map_err(|e| format!("Could not read the iPhone's name: {e}"))?;
+                (info.name, info.udid)
+            }
+            None => (
+                device::apple_view(udid).map(|view| view.name).unwrap_or_else(|| "iPhone".to_string()),
+                udid.to_string(),
+            ),
+        };
 
         sideloader
             .get_dev_session()
-            .ensure_device_registered(&team, &info.name, &info.udid, None)
+            .ensure_device_registered(&team, &device_name, &device_udid, None)
             .await
             .map_err(|e| friendly_install_error(&e.to_string()))?;
 
@@ -670,9 +879,20 @@ async fn install(
         }
     };
 
-    install_signed(&provider, &signed, copy_progress)
-        .await
-        .map_err(|e| friendly_install_error(&e.to_string()))?;
+    match &provider {
+        Some(provider) => install_signed(provider, &signed, copy_progress)
+            .await
+            .map_err(|e| friendly_install_error(&e.to_string()))?,
+        None => {
+            let _ = events.send(Event::Status("Installing through Apple's own tool".to_string()));
+            let talk = events.clone();
+            device::install_with_apple_tooling(udid, &signed, |note| {
+                let _ = talk.send(Event::Status(note.to_string()));
+            })
+            .await?;
+            let _ = events.send(Event::Progress(0.95));
+        }
+    }
 
     // Read these before the signed copy is thrown away.
     let profile_uuid = crate::handoff::profile_uuid(&signed);
@@ -691,21 +911,23 @@ async fn install(
     // is answered with a bare {success: false}. So the profile is registered
     // through misagent first, the way AltStore does, and the trust request is
     // retried for a few seconds while the install settles.
-    if let Some(bytes) = profile_bytes {
-        match crate::handoff::register_profile(&provider, bytes).await {
-            Ok(()) => tracing::info!("provisioning profile registered with the phone"),
-            Err(message) => tracing::warn!("could not register the profile: {message}"),
-        }
-    }
     let mut trusted = false;
-    if let Some(uuid) = &profile_uuid {
-        for attempt in 1..=5u32 {
-            match crate::handoff::trust_signer(&provider, uuid).await {
-                Ok(true) => { trusted = true; break; }
-                Ok(false) => tracing::warn!("trust attempt {attempt}: the phone said no"),
-                Err(message) => tracing::warn!("trust attempt {attempt}: {message}"),
+    if let Some(provider) = &provider {
+        if let Some(bytes) = profile_bytes {
+            match crate::handoff::register_profile(provider, bytes).await {
+                Ok(()) => tracing::info!("provisioning profile registered with the phone"),
+                Err(message) => tracing::warn!("could not register the profile: {message}"),
             }
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+        if let Some(uuid) = &profile_uuid {
+            for attempt in 1..=5u32 {
+                match crate::handoff::trust_signer(provider, uuid).await {
+                    Ok(true) => { trusted = true; break; }
+                    Ok(false) => tracing::warn!("trust attempt {attempt}: the phone said no"),
+                    Err(message) => tracing::warn!("trust attempt {attempt}: {message}"),
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
         }
     }
     let _ = events.send(Event::Trusted(trusted));
@@ -717,16 +939,18 @@ async fn install(
     // The record travelled inside the app, so there is nothing left to hand
     // over. The AFC push only runs when bundling failed; iOS refuses it on
     // most versions, but it is the only remaining route in that case.
-    if !record_bundled {
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        if let Err(message) = crate::handoff::send_pairing_record(&provider, &bundle_id).await {
-            tracing::warn!("pairing handoff skipped: {message}");
+    if let Some(provider) = &provider {
+        if !record_bundled {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            if let Err(message) = crate::handoff::send_pairing_record(provider, &bundle_id).await {
+                tracing::warn!("pairing handoff skipped: {message}");
+            }
         }
-    }
 
-    step(0.98, "Leaving a copy for on-phone refresh");
-    if let Err(message) = crate::handoff::send_app_copy(&provider, &bundle_id, ipa).await {
-        tracing::warn!("could not leave an app copy for on-phone refresh: {message}");
+        step(0.98, "Leaving a copy for on-phone refresh");
+        if let Err(message) = crate::handoff::send_app_copy(provider, &bundle_id, ipa).await {
+            tracing::warn!("could not leave an app copy for on-phone refresh: {message}");
+        }
     }
 
     step(1.0, "Done");
@@ -911,25 +1135,92 @@ fn hostname() -> String {
 /// family of causes: no DNS, no route, a filtered network, a captive portal
 /// that has not been signed into.
 async fn apple_reachable() -> Result<(), String> {
-    for host in ["gsa.apple.com:443", "developerservices2.apple.com:443"] {
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(8),
-            tokio::net::TcpStream::connect(host),
-        )
-        .await
-        {
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => {
-                let failure = format!("{host}: {error}");
-                if name_lookup_failed(&failure) && apple_answers_by_address().await {
-                    return Err(BROKEN_RESOLVER.to_string());
+    // All at once. These are independent questions about the same route, and
+    // asking them one after another turned a four second check into half a
+    // minute on a slow line, which reads as the installer having hung.
+    let doors = ["gsa.apple.com:443", "developerservices2.apple.com:443"];
+    let knocks: Vec<_> = doors
+        .iter()
+        .map(|host| {
+            let host = host.to_string();
+            tokio::spawn(async move {
+                let outcome = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    tokio::net::TcpStream::connect(&host),
+                )
+                .await;
+                match outcome {
+                    Ok(Ok(_)) => Ok(()),
+                    Ok(Err(error)) => Err(format!("{host}: {error}")),
+                    Err(_) => Err(format!("{host}: timed out")),
                 }
-                return Err(failure);
-            }
-            Err(_) => return Err(format!("{host}: timed out")),
+            })
+        })
+        .collect();
+
+    // One failure is enough to stop, but only after both have been asked, so
+    // the error names whichever actually broke rather than whichever was first.
+    let mut answers = Vec::new();
+    for knock in knocks {
+        answers.push(knock.await.unwrap_or_else(|e| Err(format!("check failed: {e}"))));
+    }
+    if let Some(failure) = answers.into_iter().find_map(Result::err) {
+        if name_lookup_failed(&failure) && apple_answers_by_address().await {
+            return Err(BROKEN_RESOLVER.to_string());
+        }
+        return Err(failure);
+    }
+
+    // A TCP connect proves almost nothing: it succeeds straight through a
+    // filter that opens the traffic and re-signs it, and the sign-in then
+    // fails much later with something that reads like Apple's fault. So do
+    // real HTTPS requests, with the same TLS stack the sign-in uses.
+    let client = reqwest::Client::builder()
+        .user_agent("Cloak Installer")
+        .timeout(std::time::Duration::from_secs(6))
+        .build()
+        .map_err(|e| format!("could not build a client: {e}"))?;
+
+    // Three of them, not one. A route that drops one request in five passes a
+    // single check and then fails the sign-in, which is a run of a dozen
+    // requests back to back. Run together they cost one request's worth of
+    // time and still catch the flakiness.
+    let tries: Vec<_> = (1..=3)
+        .map(|attempt| {
+            let client = client.clone();
+            tokio::spawn(async move {
+                match client.get("https://gsa.apple.com/grandslam/GsService2").send().await {
+                    // Any answer at all is a good answer: 401 is what Apple
+                    // says to an unauthenticated GET, and it proves the whole
+                    // path works.
+                    Ok(_) => None,
+                    Err(error) => Some(format!("try {attempt}: {error}")),
+                }
+            })
+        })
+        .collect();
+    let mut failures: Vec<String> = Vec::new();
+    for handle in tries {
+        if let Ok(Some(failure)) = handle.await {
+            failures.push(failure);
         }
     }
-    Ok(())
+
+    if failures.is_empty() {
+        return Ok(());
+    }
+
+    if failures.len() == 3 {
+        return Err(format!("https to gsa.apple.com: {}", failures.join("; ")));
+    }
+
+    // Some worked, some did not. That is the worst kind, because it looks
+    // like everything is fine right up until it is not.
+    Err(format!(
+        "FLAKY: {} of 3 requests to Apple failed. {}",
+        failures.len(),
+        failures.join("; ")
+    ))
 }
 
 /// Marker for the one network fault that is this computer rather than the line.
@@ -1038,12 +1329,70 @@ fn tunnel_in_the_way() -> Option<String> {
         }
     }
 
+    // Tailscale does not appear in scutil at all: it owns a utun of its own
+    // and nothing lists it as a network service. Everything on the machine
+    // going through an exit node looks exactly like this, and it was the
+    // blind spot that made a blocked network read as Apple's refusal.
+    if let Some(name) = tailscale_exit_node() {
+        return Some(name);
+    }
+
     Some("a VPN".to_string())
 }
 
 #[cfg(not(target_os = "macos"))]
 fn tunnel_in_the_way() -> Option<String> {
     None
+}
+
+/// Tailscale, and the exit node it is sending everything through if there is
+/// one. An exit node is the case that matters: all traffic leaves through
+/// somebody else's machine, and when that machine is having a bad day every
+/// request from here fails in a way that looks like the far end's fault.
+#[cfg(target_os = "macos")]
+fn tailscale_exit_node() -> Option<String> {
+    for binary in [
+        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+        "/usr/local/bin/tailscale",
+        "/opt/homebrew/bin/tailscale",
+    ] {
+        if !std::path::Path::new(binary).exists() {
+            continue;
+        }
+        let Ok(output) = std::process::Command::new(binary).args(["status", "--json"]).output() else {
+            continue;
+        };
+        let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+            continue;
+        };
+        if parsed.get("BackendState").and_then(|v| v.as_str()) != Some("Running") {
+            return None;
+        }
+        // The active exit node is the peer flagged as one.
+        if let Some(peers) = parsed.get("Peer").and_then(|v| v.as_object()) {
+            for peer in peers.values() {
+                if peer.get("ExitNode").and_then(|v| v.as_bool()) == Some(true) {
+                    let name = peer
+                        .get("HostName")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("another machine");
+                    return Some(format!("Tailscale, through the exit node {name}"));
+                }
+            }
+        }
+        return Some("Tailscale".to_string());
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn tailscale_running() -> bool {
+    tailscale_exit_node().is_some()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn tailscale_running() -> bool {
+    false
 }
 
 /// Whether Apple rejected the request because the sign-in helper gave it
@@ -1055,10 +1404,55 @@ fn tunnel_in_the_way() -> Option<String> {
 /// often works immediately.
 fn looks_like_bad_helper(text: &str) -> bool {
     let lower = text.to_lowercase();
-    lower.contains("anisette")
-        || lower.contains("grandslam")
-        || lower.contains("503")
-        || lower.contains("temporarily unavailable")
+
+    // A request that never got an answer says nothing about what Apple thinks
+    // of anybody's identity. This has to be ruled out first, because the
+    // module that talks to Apple is called grandslam and its name is in the
+    // source path of every error it ever produces, network ones included.
+    if looks_like_transport(&lower) {
+        return false;
+    }
+
+    let apple_had_a_verdict = (lower.contains("grandslam") || lower.contains("gsservice2"))
+        && (lower.contains("503") || lower.contains("temporarily unavailable"));
+
+    apple_had_a_verdict
+        || lower.contains("-45003")
+        || lower.contains("invalid trust key")
+        || lower.contains("failed to provision")
+        || lower.contains("provisioning failed")
+}
+
+/// The request never completed. Nothing here is a verdict from Apple: it is
+/// DNS, TLS, a dropped connection or a timeout, and the fix is on this side.
+fn looks_like_transport(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("error sending request")
+        || lower.contains("failed to send")
+        || lower.contains("connection reset")
+        || lower.contains("connection closed")
+        || lower.contains("connection refused")
+        || lower.contains("network is unreachable")
+        || lower.contains("no route to host")
+        || lower.contains("operation timed out")
+        || lower.contains("timed out")
+        || lower.contains("dns error")
+        || lower.contains("could not resolve")
+        || looks_intercepted(&lower)
+}
+
+/// Something is sitting between this computer and the internet, opening the
+/// traffic and re-signing it with its own certificate. School and office
+/// filters do this. curl trusts it because its certificate is in the system
+/// store; the signing library does not, and refuses the connection.
+fn looks_intercepted(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("certificate is not trusted")
+        || lower.contains("invalid peer certificate")
+        || lower.contains("-67843")
+        || lower.contains("unknown issuer")
+        || lower.contains("self signed")
+        || lower.contains("self-signed")
 }
 
 /// Whether a sign-in failure was the network rather than the account.
@@ -1111,6 +1505,22 @@ fn friendly_login_error(raw: &str) -> String {
     if wrong_password(&lower) {
         return "Apple says that password is not right for this Apple ID.\n\nEverything else worked: Apple accepted the computer, accepted the Apple ID, and checked the password, so this is the password itself and nothing else.\n\nTwo things catch people out. An app-specific password will not work here, it has to be the real one. And if two-factor is on, the password still goes in this box and the six digit code is asked for separately afterwards.\n\nIf it is definitely right, sign in at appleid.apple.com once in a browser and then try here again.".to_string();
     }
+    if looks_intercepted(&lower) {
+        return format!(
+            "Something on this network is opening encrypted traffic and re-signing it, and Apple's sign-in will not accept that.\n\nThis is what a school, office or guest network filter does. Cloak saw a certificate that was not Apple's on the way to Apple.{}\n\nUse a different network, or share your phone's internet connection and try again from there.",
+            match tunnel_in_the_way() {
+                Some(name) => format!(" Everything on this computer is currently going through {name}, so try turning that off first."),
+                None => String::new(),
+            }
+        );
+    }
+    if looks_like_transport(&lower) {
+        return format!(
+            "{}\n\nApple never answered: the connection itself failed, so nothing was judged and nothing is wrong with the Apple ID.\n\nWhat went wrong underneath: {}",
+            unreachable_message(),
+            raw.lines().find(|line| line.contains("error sending request") || line.contains("certificate")).unwrap_or(raw).trim()
+        );
+    }
     if looks_rate_limited(&lower) {
         if let Some(name) = tunnel_in_the_way() {
             return format!(
@@ -1154,6 +1564,81 @@ fn friendly_install_error(raw: &str) -> String {
         "The iPhone has not trusted this computer. Unlock it, tap Trust, then try again.".into()
     } else {
         format!("Installing failed.\n\n{raw}")
+    }
+}
+
+#[cfg(test)]
+mod classification {
+    use super::*;
+
+    /// The real failure from Bob's Mac after the helper sweep was reordered.
+    /// An identity minted by one helper was sent to another, and Apple
+    /// answered this at the password step without ever judging the password.
+    const STALE_IDENTITY: &str = "Failed to log in to Apple ID vendor/isideload/src/auth/apple_account.rs:289 GrandSlam error during proof login request vendor/isideload/src/auth/apple_account.rs:1058 Auth error -22421: This action could not be completed. Try again. vendor/isideload/src/auth/grandslam.rs:350";
+
+    #[test]
+    fn an_unverifiable_identity_is_recognised() {
+        assert!(crate::anisette::stale_session(STALE_IDENTITY));
+    }
+
+    #[test]
+    fn an_unverifiable_identity_is_not_a_refused_helper() {
+        // It used to fall through to here, which blacklisted a helper that
+        // was working and reported an outage that was not happening.
+        assert!(!crate::anisette::helper_was_rejected(STALE_IDENTITY));
+    }
+
+    #[test]
+    fn an_unverifiable_identity_is_not_a_dropped_connection() {
+        assert!(!looks_like_transport(STALE_IDENTITY));
+    }
+
+    #[test]
+    fn an_unverifiable_identity_is_not_a_wrong_password() {
+        assert!(!wrong_password(STALE_IDENTITY));
+    }
+
+    #[test]
+    fn a_dropped_connection_is_not_an_unverifiable_identity() {
+        assert!(!crate::anisette::stale_session(NETWORK_FAILURE));
+    }
+
+    /// The real failure from Bob's Mac, verbatim. It was reported as Apple
+    /// refusing the identity because the word "grandslam" is in the source
+    /// path of every error that module produces.
+    const NETWORK_FAILURE: &str = " ● Failed to send proof login request ● Failed to send grandslam request ├ vendor/isideload/src/auth/grandslam.rs:203 ● error sending request for url (https://gsa.apple.com/grandslam/GsService2) ╰ vendor/isideload/src/auth/grandslam.rs:203";
+
+    #[test]
+    fn a_dead_connection_is_not_apple_refusing_anything() {
+        assert!(looks_like_transport(NETWORK_FAILURE));
+        assert!(!looks_like_bad_helper(NETWORK_FAILURE));
+        let message = friendly_login_error(NETWORK_FAILURE);
+        assert!(!message.contains("Apple turned this sign-in away"));
+        assert!(message.contains("cannot reach Apple"));
+    }
+
+    #[test]
+    fn an_intercepted_connection_says_so() {
+        let text = "invalid peer certificate: Other(OtherError(\"F7CF1ATB21000078 certificate is not trusted: -67843\"))";
+        assert!(looks_intercepted(text));
+        assert!(!looks_like_bad_helper(text));
+        assert!(friendly_login_error(text).contains("re-signing"));
+    }
+
+    #[test]
+    fn a_real_refusal_still_reads_as_one() {
+        let text = "grandslam request failed: 503 Service Temporarily Unavailable";
+        assert!(looks_like_bad_helper(text));
+        assert!(friendly_login_error(text).contains("Apple turned this sign-in away"));
+
+        let trust = "Anisette provisioning failed: -45003 invalid trust key";
+        assert!(looks_like_bad_helper(trust));
+    }
+
+    #[test]
+    fn a_wrong_password_still_wins() {
+        let text = "-20101 the password is incorrect";
+        assert!(friendly_login_error(text).contains("password is not right"));
     }
 }
 
@@ -1228,3 +1713,66 @@ async fn remote_pair(
     }
     Err(last)
 }
+
+
+/// A background task that is cancelled when it goes out of scope.
+///
+/// Every exit from the sign-in loop is a `continue`, a `break` or a `return`,
+/// and a status ticker that outlived one of those would talk over whatever
+/// came next.
+pub struct StopOnDrop(pub tokio::task::JoinHandle<()>);
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+
+/// Opens the developer session, riding out a connection that drops requests.
+///
+/// This is the step straight after the password, and it is a fresh request to
+/// the same endpoint the sign-in just used. On a line that drops one request
+/// in five it lands on the bad one often enough to be the normal outcome, and
+/// failing here threw away a sign-in that had completely succeeded, which is
+/// the most expensive possible moment to give up.
+///
+/// Only a dropped connection is retried. An answer from Apple is an answer.
+async fn open_developer_session(
+    account: &mut AppleAccount,
+    events: &Events,
+) -> Result<DeveloperSession, String> {
+    let mut last = String::new();
+
+    for attempt in 1..=4u32 {
+        if attempt > 1 {
+            let _ = events.send(Event::Status(
+                "The connection dropped that request. Trying again".to_string(),
+            ));
+            tokio::time::sleep(std::time::Duration::from_secs(2 * attempt as u64)).await;
+        }
+
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(45),
+            DeveloperSession::from_account(account),
+        )
+        .await
+        {
+            Ok(Ok(session)) => return Ok(session),
+            Ok(Err(error)) => {
+                let text = error.to_string();
+                // Apple answered and said no. Another go changes nothing.
+                if !looks_like_transport(&text) {
+                    return Err(format!("Apple would not open a developer session: {text}"));
+                }
+                last = text;
+            }
+            Err(_) => last = "the request to Apple timed out".to_string(),
+        }
+        tracing::warn!("developer session attempt {attempt} did not complete: {last}");
+    }
+
+    tracing::error!("developer session never completed: {last}");
+    Err(friendly_login_error(&last))
+}
+

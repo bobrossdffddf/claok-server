@@ -10,6 +10,14 @@ _to_delete/
 .out.txt
 .work.sh
 
+# Session scratch, screenshots and probes, not part of the project
+.work/
+Claude outputs/
+.syslog-probe.sh
+
+# Built by Scripts/build-bridge.sh, too large for the repository
+Frameworks/CloakBridge.xcframework/**/*.a
+
 Cloak.xcodeproj/
 Packages/*/.build/
 Packages/*/build/

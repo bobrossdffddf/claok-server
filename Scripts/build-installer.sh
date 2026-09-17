@@ -19,10 +19,11 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/.build/cargo}"
 export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=/build --remap-path-prefix=$ROOT=/src"
 
 # Cargo keeps its own copy of the version and it is what the binary reports at
-# startup, so bring it into line rather than letting the two drift.
-if ! grep -q "^version = \"$CLOAK_VERSION.0\"$" "$DESKTOP/Cargo.toml"; then
-  /usr/bin/sed -i '' "s/^version = \".*\"$/version = \"$CLOAK_VERSION.0\"/" "$DESKTOP/Cargo.toml"
-  echo "set Desktop/Cargo.toml version to $CLOAK_VERSION.0"
+# startup, so bring it into line rather than letting the two drift. The three
+# part form comes from version.sh.
+if ! grep -q "^version = \"$CLOAK_CARGO_VERSION\"$" "$DESKTOP/Cargo.toml"; then
+  /usr/bin/sed -i '' "s/^version = \".*\"$/version = \"$CLOAK_CARGO_VERSION\"/" "$DESKTOP/Cargo.toml"
+  echo "set Desktop/Cargo.toml version to $CLOAK_CARGO_VERSION"
 fi
 
 cd "$DESKTOP"

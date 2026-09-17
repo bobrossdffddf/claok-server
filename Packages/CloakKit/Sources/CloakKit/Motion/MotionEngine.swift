@@ -14,9 +14,18 @@ public struct MotionEngineState: Sendable {
 public struct MotionEngine: Sendable {
     public static let subStep: TimeInterval = 0.2
     public static let arrivalWindow: Double = 4
+    /// The same window for someone on foot. Four metres is under a second of
+    /// driving and the car has slowed to a crawl by then, but it is three
+    /// seconds of walking at full pace, and closing it in one fix is a jump.
+    public static let footArrivalWindow: Double = 1.2
     public static let arrivalSpeed: Double = 1.5
     public static let creepSpeed: Double = 0.8
     public static let brakingMargin: Double = 0.7
+    /// The slowest pace worth assuming when guessing how long the rest of the
+    /// trip takes. A walk is not a drive that is going slowly, so the floor
+    /// has to follow the mode or the arrival time on screen is nonsense.
+    public static let driveFloor: Double = Speed.mph(8)
+    public static let footFloor: Double = Speed.mph(2)
 
     public let profile: SpeedProfile
     public let persona: DriverPersona
@@ -39,11 +48,24 @@ public struct MotionEngine: Sendable {
         return min(1, state.distance / profile.polyline.length)
     }
 
+    /// How the person is getting along right now, which on a mixed route is
+    /// not always the mode the trip was asked for.
+    public var currentMode: TravelMode {
+        profile.modes.isEmpty ? mode : profile.mode(at: state.distance)
+    }
+
+    /// The persona that governs movement here. Car numbers on the road, feet
+    /// numbers on the footway.
+    private var currentPersona: DriverPersona {
+        persona.moving(as: currentMode)
+    }
+
     public var remainingTime: TimeInterval? {
         guard !state.finished else { return 0 }
         let remaining = profile.polyline.length - state.distance
         guard remaining > 0 else { return 0 }
-        let assumed = max(profile.minimumSpeed(from: state.distance, to: profile.polyline.length), Speed.mph(8))
+        let floor = currentMode.isOnFoot ? Self.footFloor : Self.driveFloor
+        let assumed = max(profile.minimumSpeed(from: state.distance, to: profile.polyline.length), floor)
         return remaining / assumed / playbackRate
     }
 
@@ -57,7 +79,12 @@ public struct MotionEngine: Sendable {
         }
         state.elapsed += total
 
-        noise = noise * 0.85 + generator.gaussian(mean: 0, deviation: persona.speedNoise) * 0.15
+        // The noise follows whatever is moving. A car's speed wanders by a
+        // tenth of a metre a second; a walking pace barely wanders at all, and
+        // a car's figure laid over a walk was enough to push it out of the
+        // band a walk is allowed to be in.
+        let spread = currentPersona.speedNoise
+        noise = noise * 0.85 + generator.gaussian(mean: 0, deviation: spread) * 0.15
         let reported = state.speed > 1 ? max(0, state.speed + noise) : state.speed
         return makeFix(speed: reported, now: now)
     }
@@ -71,9 +98,14 @@ public struct MotionEngine: Sendable {
         }
 
         let length = profile.polyline.length
+        let here = currentPersona
+        let window = currentMode.isOnFoot ? Self.footArrivalWindow : Self.arrivalWindow
 
-        if let stop = pendingStop(), stop.alongTrack - state.distance <= Self.arrivalWindow, state.speed < Self.arrivalSpeed {
-            state.distance = stop.alongTrack
+        if let stop = pendingStop(), stop.alongTrack - state.distance <= window, state.speed < Self.arrivalSpeed {
+            // Rest where the car has already crept to. Snapping it up onto the
+            // stop's own position pushed it the last few metres forward, and
+            // the last few metres of an approach are the junction, so the wait
+            // happened past the line rather than on the approach to it.
             state.dwellRemaining = stop.dwell
             state.pendingStopIndex += 1
             state.stopsMade += 1
@@ -82,7 +114,7 @@ public struct MotionEngine: Sendable {
             return
         }
 
-        if length - state.distance <= Self.arrivalWindow, state.speed < Self.arrivalSpeed {
+        if length - state.distance <= window, state.speed < Self.arrivalSpeed {
             state.distance = length
             state.speed = 0
             state.acceleration = 0
@@ -90,26 +122,28 @@ public struct MotionEngine: Sendable {
             return
         }
 
-        let brakingDistance = (state.speed * state.speed) / (2 * persona.braking)
+        let brakingDistance = (state.speed * state.speed) / (2 * here.braking)
         let lookAhead = state.distance + max(6, state.speed * dt + brakingDistance)
         var target = profile.minimumSpeed(from: state.distance, to: lookAhead)
 
         var gate = length - state.distance
         if let stop = pendingStop() { gate = min(gate, stop.alongTrack - state.distance) }
         gate = max(0, gate - state.speed * dt)
-        target = min(target, sqrt(2 * persona.braking * Self.brakingMargin * gate))
+        target = min(target, sqrt(2 * here.braking * Self.brakingMargin * gate))
 
         if target < Self.creepSpeed && gate > 0.1 { target = Self.creepSpeed }
 
         let desired = target > state.speed
-            ? min(persona.acceleration, (target - state.speed) / dt)
-            : max(-persona.braking, (target - state.speed) / dt)
+            ? min(here.acceleration, (target - state.speed) / dt)
+            : max(-here.braking, (target - state.speed) / dt)
 
-        let maxChange = persona.jerkLimit * dt
+        let maxChange = here.jerkLimit * dt
         state.acceleration = min(max(desired, state.acceleration - maxChange), state.acceleration + maxChange)
         state.speed = max(0, state.speed + state.acceleration * dt)
         state.distance = min(length, state.distance + state.speed * dt)
 
+        // Overshooting a stop within one sub-step is pulled back to the line
+        // rather than left past it, for the same reason.
         while let stop = pendingStop(), stop.alongTrack <= state.distance {
             state.distance = stop.alongTrack
             state.dwellRemaining = stop.dwell

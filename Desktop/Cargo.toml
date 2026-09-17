@@ -1,6 +1,6 @@
 [package]
 name = "cloak-installer"
-version = "1.4.0"
+version = "1.7.0"
 edition = "2021"
 description = "Puts Cloak on your iPhone and keeps it there."
 
@@ -8,14 +8,31 @@ description = "Puts Cloak on your iPhone and keeps it there."
 name = "cloak-installer"
 path = "src/main.rs"
 
+[features]
+default = ["gui"]
+gui = ["dep:eframe", "dep:egui"]
+cli = []
+
 [dependencies]
-eframe = "0.31"
-egui = "0.31"
+eframe = { version = "0.31", optional = true }
+egui = { version = "0.31", optional = true }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "fs", "process"] }
 idevice = { version = "0.1.65", features = [
     "usbmuxd", "amfi", "installation_proxy", "afc", "misagent", "heartbeat", "house_arrest", "ring",
     "remote_pairing",
+    # The door Xcode uses on iOS 17 and later. The doctor reports whether it
+    # opens when lockdown's own port does not, which is the one measurement
+    # that tells a broken cable apart from a phone refusing the old route.
+    "core_device_proxy",
+    # Reaching the phone over the cable's own network link, which is the only
+    # route left when the driver refuses to proxy.
+    "tcp",
+    # Remote Service Discovery: the only door iOS 26.4 and later leaves open to
+    # anything that is not Apple's own software.
+    "rsd",
+    "xpc",
+    "tunnel_tcp_stack",
 ] }
 # Finding the phone's remote pairing service on the local network, the way
 # Xcode does. Pure Rust, so it builds for Windows too.

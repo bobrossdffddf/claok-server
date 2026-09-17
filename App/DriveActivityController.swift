@@ -26,29 +26,18 @@ final class DriveActivityController {
             return
         }
 
-        let fix = snapshot.fix
-        let state = DriveActivityAttributes.ContentState(
-            label: snapshot.mode.subject,
-            activity: snapshot.mode.activityWord,
-            symbol: snapshot.mode.symbol,
-            latitude: fix?.coordinate.latitude ?? 0,
-            longitude: fix?.coordinate.longitude ?? 0,
-            speedMph: Speed.toMph(fix?.speed ?? 0),
-            speedLimitMph: snapshot.speedLimit.map(Speed.toMph),
-            progress: snapshot.progress,
-            distanceRemaining: snapshot.distanceRemaining,
-            isPaused: snapshot.isPaused,
-            startedAt: snapshot.startedAt ?? .now,
-            realSpeedMph: snapshot.shieldRealSpeed.map(Speed.toMph),
-            holdingBackMetres: snapshot.shieldHoldingBack
-        )
+        // One place builds the whole state, so `endsAt` comes from the
+        // engine's own estimate and `updatedAt` is genuinely the moment these
+        // numbers were true. Both matter: the activity's ETA and its staleness
+        // are computed from them.
+        let state = DriveActivityAttributes.ContentState(snapshot: snapshot)
 
         if let running = activity {
             // A Live Activity has a strict update budget, so this is throttled
             // rather than pushed on every one second tick.
             guard Date.now.timeIntervalSince(lastPush) > 2 else { return }
             lastPush = .now
-            let box = Unchecked(value: (running, ActivityContent(state: state, staleDate: nil)))
+            let box = Unchecked(value: (running, ActivityContent(state: state, staleDate: state.staleDate)))
             Task.detached {
                 await box.value.0.update(box.value.1)
             }
@@ -58,7 +47,7 @@ final class DriveActivityController {
         do {
             activity = try Activity.request(
                 attributes: DriveActivityAttributes(),
-                content: ActivityContent(state: state, staleDate: nil),
+                content: ActivityContent(state: state, staleDate: state.staleDate),
                 pushType: nil
             )
             lastPush = .now

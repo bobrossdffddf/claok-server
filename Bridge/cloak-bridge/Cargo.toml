@@ -35,6 +35,8 @@ idevice = { version = "0.1.65", features = [
     "remote_pairing",
     "afc",
     "installation_proxy",
+    "heartbeat",
+    "misagent",
 ] }
 # The same signing library the desktop installer uses. It builds for
 # aarch64-apple-ios, which is what makes renewing on the phone possible at all.
@@ -42,6 +44,9 @@ idevice = { version = "0.1.65", features = [
 # signature cannot carry, and the state goes in the app container instead.
 isideload = { version = "0.3.17", default-features = false, features = ["install", "tokio-mt"] }
 rootcause = "0.12"
+async-trait = "0.1"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "http2", "charset"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util"] }
 plist = "1"
 serde = "1"

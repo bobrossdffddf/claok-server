@@ -59,7 +59,8 @@ int cloak_renew_start(const char *apple_id,
                       const unsigned char *pairing, size_t pairing_len,
                       const char *address,
                       const char *device_name,
-                      const char *device_udid);
+                      const char *device_udid,
+                      const char *handoff_json);
 int cloak_renew_state(char *out, size_t capacity);
 int cloak_renew_submit_code(const char *code);
 int cloak_renew_cancel(void);

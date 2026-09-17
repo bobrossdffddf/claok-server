@@ -1,59 +1,102 @@
 import SwiftUI
 import CloakKit
 
-struct DriveTab: View {
-    @Environment(AppModel.self) private var model
+/// The drive card, when nothing is running: the speed and the stick, SHIELD,
+/// and auto stop. While something runs the same controls open under the
+/// running card instead, with no card of their own.
+struct DriveCard: View {
+    let chrome: CardContext
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 18) {
-                SpeedDial(
-                    speed: model.snapshot.fix?.speed ?? 0,
-                    limit: model.snapshot.speedLimit,
-                    course: model.snapshot.fix?.course ?? -1
-                )
-                .padding(.top, 8)
-
-                shieldCard
-
-                JoystickPad()
-
-                autoExpire
-
-                if model.snapshot.isRunning {
-                    Button("Stop simulating") {
-                        Task { await model.stop() }
-                    }
-                    .buttonStyle(QuietButtonStyle(tint: Palette.danger))
-                }
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 16)
+        FloatingCard(title: "Drive", collapsible: true, onClose: chrome.onClose) {
+            DriveControls()
         }
     }
+}
+
+/// The speed dial, the joystick, SHIELD and auto stop.
+///
+/// Laid out in a plain stack inside the card's scroll view, never a List: the
+/// joystick is a zero-distance drag, and a List row is a cell that can claim
+/// the touch for its own scrolling and never send the release that stops the
+/// car.
+struct DriveControls: View {
+    @Environment(AppModel.self) private var model
 
     @State private var shieldProblem: String?
     @State private var shieldStarting = false
+    @State private var showsShieldHelp = false
+
+    var body: some View {
+        VStack(spacing: Metrics.regular) {
+            // The instrument and the control side by side, so both are on
+            // screen at once. Stacked, the dial alone filled the card.
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: Metrics.snug) {
+                    dial
+                    JoystickPad()
+                }
+                VStack(spacing: Metrics.regular) {
+                    dial
+                    JoystickPad()
+                }
+            }
+            .frame(maxWidth: .infinity)
+
+            // SHIELD and auto stop on one surface, not a box each.
+            CardGroup {
+                shield
+                GroupDivider()
+                autoExpire
+            }
+        }
+    }
+
+    private var dial: some View {
+        SpeedDial(
+            speed: model.snapshot.fix?.speed ?? 0,
+            limit: model.snapshot.speedLimit,
+            course: model.snapshot.fix?.course ?? -1,
+            diameter: 150
+        )
+    }
 
     /// SHIELD: drive for real, be seen at the limit.
-    private var shieldCard: some View {
+    private var shield: some View {
         let settings = model.shield
         let active = model.isShielding
 
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
+        return VStack(spacing: 0) {
+            HStack(spacing: Metrics.snug) {
                 Image(systemName: "shield.checkered")
-                    .font(.system(.title3, weight: .semibold))
-                    .foregroundStyle(settings.isEnabled ? Palette.accent : Palette.dim)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("SHIELD")
-                        .font(.label(15, weight: .semibold))
-                        .foregroundStyle(.white)
-                    Text("Drive for real. Press go, and apps see you at the limit.")
-                        .font(.label(12))
-                        .foregroundStyle(Palette.dim)
+                    .font(.body)
+                    .foregroundStyle(Color(.secondaryLabel))
+                    .frame(width: 24)
+                    .accessibilityHidden(true)
+                Text("SHIELD")
+                    .font(.body)
+                    .foregroundStyle(Color(.label))
+                Button {
+                    showsShieldHelp = true
+                } label: {
+                    Image(systemName: "info.circle")
+                        .font(.body)
+                        .foregroundStyle(Color(.tertiaryLabel))
+                        .frame(width: 44, height: 44)
+                        .contentShape(.rect)
                 }
-                Spacer()
+                .buttonStyle(.plain)
+                .accessibilityLabel("What SHIELD does")
+                .popover(isPresented: $showsShieldHelp) {
+                    Text("Drive for real, and apps see you at the limit however fast the car goes. \(settings.mode.detail). Press Start as you pull out. Set a destination on the Route card first only if you want it to follow a particular way.")
+                        .font(.subheadline)
+                        .foregroundStyle(Color(.label))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(width: 280)
+                        .padding()
+                        .presentationCompactAdaptation(.popover)
+                }
+                Spacer(minLength: Metrics.tight)
                 Toggle("", isOn: Binding(
                     get: { settings.isEnabled },
                     set: { model.setShield(settings.with(isEnabled: $0)) }
@@ -61,96 +104,107 @@ struct DriveTab: View {
                 .labelsHidden()
                 .tint(Palette.accent)
                 .disabled(active)
+                .accessibilityLabel("SHIELD")
             }
+            .padding(.leading, 14)
+            .padding(.trailing, 14)
+            .frame(minHeight: 52)
 
             if settings.isEnabled {
-                Picker("Mode", selection: Binding(
-                    get: { settings.mode },
-                    set: { model.setShield(settings.with(mode: $0)) }
+                GroupDivider()
+
+                VStack(alignment: .leading, spacing: Metrics.snug) {
+                    Picker("SHIELD mode", selection: Binding(
+                        get: { settings.mode },
+                        set: { model.setShield(settings.with(mode: $0)) }
+                    )) {
+                        ForEach(ShieldSettings.Mode.allCases) { mode in
+                            Text(mode.name).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .disabled(active)
+
+                    if active {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(model.snapshot.fix.map { String(format: "Reporting %.0f mph", Units.mph($0.speed)) } ?? "Starting")
+                                .font(.live(.subheadline))
+                                .foregroundStyle(Color(.label))
+                            Text(model.snapshot.speedLimit.map { String(format: "Limit here %.0f mph", Units.mph($0)) } ?? "Reading the limit")
+                                .font(.footnote)
+                                .foregroundStyle(Color(.secondaryLabel))
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                        Button(role: .destructive) {
+                            Task { await model.stop() }
+                        } label: {
+                            Text("Stop SHIELD")
+                        }
+                        .buttonStyle(CardSecondaryButtonStyle(tint: Palette.danger))
+                    } else if !model.snapshot.isRunning {
+                        Button {
+                            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                            shieldStarting = true
+                            shieldProblem = nil
+                            Task {
+                                shieldProblem = await model.startShield()
+                                shieldStarting = false
+                            }
+                        } label: {
+                            Text(shieldStarting ? "Starting" : (model.routeWaypoints.count >= 2 ? "Start SHIELD on your route" : "Start SHIELD"))
+                        }
+                        .buttonStyle(PrimaryButtonStyle())
+                        .disabled(shieldStarting)
+                    }
+
+                    if let shieldProblem {
+                        Text(shieldProblem)
+                            .font(.footnote)
+                            .foregroundStyle(Palette.warn)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(14)
+            }
+        }
+    }
+
+    /// Auto stop, as one row with the five lengths under it.
+    private var autoExpire: some View {
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: Metrics.tight) {
+                HStack {
+                    Text("Auto stop")
+                        .font(.body)
+                        .foregroundStyle(Color(.label))
+                    Spacer()
+                    Text(model.autoStopMinutes == 0 ? "Off" : "\(model.autoStopMinutes) min")
+                        .font(.live(.subheadline, weight: .regular))
+                        .foregroundStyle(Color(.secondaryLabel))
+                }
+                Picker("Auto stop", selection: Binding(
+                    get: { model.autoStopMinutes },
+                    set: { model.setAutoStop(minutes: $0) }
                 )) {
-                    ForEach(ShieldSettings.Mode.allCases) { mode in
-                        Text(mode.name).tag(mode)
+                    ForEach([0, 15, 30, 60, 240], id: \.self) { minutes in
+                        Text(Self.autoStopLabel(minutes)).tag(minutes)
                     }
                 }
                 .pickerStyle(.segmented)
-                .disabled(active)
-
-                Text(settings.mode.detail + ". Just press Start as you pull out. SHIELD follows the road you are on and reports you at the limit however fast the car really goes. Set a destination on the Route tab first only if you want it to follow a specific way.")
-                    .font(.label(12))
-                    .foregroundStyle(Palette.dim)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                if active {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(model.snapshot.fix.map { String(format: "Reporting %.0f mph", Units.mph($0.speed)) } ?? "Starting")
-                                .font(.readout(13))
-                                .foregroundStyle(.white)
-                            Text(model.snapshot.speedLimit.map { String(format: "Limit here %.0f mph", Units.mph($0)) } ?? "Reading the limit")
-                                .font(.label(12))
-                                .foregroundStyle(Palette.dim)
-                        }
-                        Spacer()
-                        Button("Stop SHIELD") { Task { await model.stop() } }
-                            .buttonStyle(QuietButtonStyle(tint: Palette.danger))
-                    }
-                } else {
-                    Button(shieldStarting ? "Starting" : (model.routeWaypoints.count >= 2 ? "Start SHIELD on your route" : "Start SHIELD")) {
-                        shieldStarting = true
-                        shieldProblem = nil
-                        Task {
-                            shieldProblem = await model.startShield()
-                            shieldStarting = false
-                        }
-                    }
-                    .buttonStyle(PrimaryButtonStyle())
-                    .disabled(shieldStarting || model.snapshot.isRunning)
-                }
-
-                if let shieldProblem {
-                    Text(shieldProblem)
-                        .font(.label(12))
-                        .foregroundStyle(Palette.warn)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                .accessibilityValue(model.autoStopMinutes == 0 ? "Off" : "After \(model.autoStopMinutes) minutes")
             }
+            .padding(14)
         }
-        .glassCard()
     }
 
-    private var autoExpire: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Eyebrow(text: "Auto stop")
-                Spacer()
-                Text(model.autoStopMinutes == 0 ? "Off" : "\(model.autoStopMinutes) min")
-                    .font(.readout(13))
-                    .foregroundStyle(model.autoStopMinutes == 0 ? Palette.dim : Palette.warn)
-            }
-            HStack(spacing: 8) {
-                ForEach([0, 15, 30, 60, 240], id: \.self) { minutes in
-                    Button {
-                        model.setAutoStop(minutes: minutes)
-                    } label: {
-                        Text(minutes == 0 ? "Off" : "\(minutes)m")
-                            .font(.label(13, weight: .semibold))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 9)
-                            .foregroundStyle(model.autoStopMinutes == minutes ? Palette.ground : .white)
-                            .background(
-                                model.autoStopMinutes == minutes ? Palette.warn : Palette.raised,
-                                in: .rect(cornerRadius: 10, style: .continuous)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            Text("Simulation ends on its own, so you can never forget it is on.")
-                .font(.label(12))
-                .foregroundStyle(Palette.dim)
+    private static func autoStopLabel(_ minutes: Int) -> String {
+        switch minutes {
+        case 0: "Off"
+        case 60: "1h"
+        case 240: "4h"
+        default: "\(minutes)m"
         }
-        .padding(14)
-        .background(Palette.surface, in: .rect(cornerRadius: 16, style: .continuous))
     }
 }
 
@@ -158,16 +212,18 @@ struct SpeedDial: View {
     let speed: Double
     let limit: Double?
     let course: Double
+    var diameter: CGFloat = 190
 
     private var mph: Int { Int(Speed.toMph(speed).rounded()) }
     private var limitMph: Int? { limit.map { Int(Speed.toMph($0).rounded()) } }
     private var fraction: Double { min(1, Speed.toMph(speed) / 80) }
+    private var stroke: CGFloat { diameter >= 170 ? 14 : 11 }
 
     var body: some View {
         ZStack {
             Circle()
                 .trim(from: 0.0, to: 0.75)
-                .stroke(Palette.raised, style: StrokeStyle(lineWidth: 14, lineCap: .round))
+                .stroke(.quaternary, style: StrokeStyle(lineWidth: stroke, lineCap: .round))
                 .rotationEffect(.degrees(135))
 
             Circle()
@@ -179,35 +235,41 @@ struct SpeedDial: View {
                         startAngle: .degrees(135),
                         endAngle: .degrees(405)
                     ),
-                    style: StrokeStyle(lineWidth: 14, lineCap: .round)
+                    style: StrokeStyle(lineWidth: stroke, lineCap: .round)
                 )
                 .rotationEffect(.degrees(135))
                 .animation(.easeOut(duration: 0.6), value: fraction)
 
-            VStack(spacing: 2) {
+            VStack(spacing: 0) {
                 Text("\(mph)")
-                    .font(.readout(46, weight: .bold))
-                    .foregroundStyle(.white)
+                    .font(.live(.largeTitle))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.5)
                 Text("mph")
-                    .font(.label(12))
-                    .foregroundStyle(Palette.dim)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 if let limitMph, limitMph > 0 {
                     Text("limit \(limitMph)")
-                        .font(.label(11, weight: .semibold))
-                        .foregroundStyle(mph > limitMph + 6 ? Palette.warn : Palette.dim)
-                        .padding(.top, 4)
+                        .font(.live(.caption2))
+                        .foregroundStyle(mph > limitMph + 6 ? Palette.warn : Color.secondary)
+                        .padding(.top, 2)
                 }
             }
 
             if course >= 0 {
                 Image(systemName: "location.north.fill")
-                    .font(.system(.caption2, weight: .black))
+                    .font(.system(.caption2, weight: .semibold))
                     .foregroundStyle(Palette.accent)
-                    .offset(y: -74)
+                    .offset(y: -(diameter / 2 - 21))
                     .rotationEffect(.degrees(course))
             }
         }
-        .frame(width: 190, height: 190)
+        .frame(width: diameter, height: diameter)
+        .dynamicTypeSize(...DynamicTypeSize.accessibility1)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Speed")
+        .accessibilityValue(limitMph.map { "\(mph) miles per hour, limit \($0)" } ?? "\(mph) miles per hour")
     }
 }
 
@@ -219,29 +281,26 @@ struct JoystickPad: View {
     private let radius: CGFloat = 74
 
     var body: some View {
-        VStack(spacing: 12) {
-            Eyebrow(text: "Manual control")
-
+        VStack(spacing: Metrics.tight) {
             ZStack {
                 Circle()
-                    .fill(Palette.surface)
-                    .overlay(Circle().strokeBorder(Palette.hairline, lineWidth: 1))
+                    .fill(.fill.quaternary)
 
                 ForEach(0..<4) { index in
                     Rectangle()
-                        .fill(Palette.hairline.opacity(0.6))
+                        .fill(.tertiary)
                         .frame(width: 1, height: 12)
                         .offset(y: -radius + 10)
                         .rotationEffect(.degrees(Double(index) * 90))
                 }
 
                 Circle()
-                    .fill(active ? Palette.accent : Palette.raised)
+                    .fill(active ? AnyShapeStyle(Palette.accent) : AnyShapeStyle(.fill.secondary))
                     .frame(width: 54, height: 54)
                     .overlay(
                         Image(systemName: "arrow.up")
-                            .font(.system(.subheadline, weight: .bold))
-                            .foregroundStyle(active ? Palette.ground : Palette.dim)
+                            .font(.system(.subheadline, weight: .semibold))
+                            .foregroundStyle(active ? AnyShapeStyle(Palette.ground) : AnyShapeStyle(.secondary))
                             .rotationEffect(.degrees(bearing))
                             .opacity(magnitude > 0.08 ? 1 : 0.3)
                     )
@@ -249,6 +308,8 @@ struct JoystickPad: View {
                     .shadow(color: active ? Palette.accent.opacity(0.5) : .clear, radius: 10)
             }
             .frame(width: radius * 2, height: radius * 2)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Manual control")
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
@@ -264,14 +325,13 @@ struct JoystickPad: View {
                     }
             )
 
-            Text(active ? String(format: "%.0f° at %.0f%%", bearing, magnitude * 100) : "Drag to walk or drive by hand")
-                .font(.label(12))
-                .foregroundStyle(Palette.dim)
+            Text(active ? String(format: "%.0f° at %.0f%%", bearing, magnitude * 100) : "Drag to move")
+                .font(.caption)
+                .foregroundStyle(Color(.secondaryLabel))
                 .monospacedDigit()
+                .lineLimit(1)
+                .frame(width: radius * 2)
         }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 16)
-        .background(Palette.surface.opacity(0.5), in: .rect(cornerRadius: 18, style: .continuous))
     }
 
     private var magnitude: Double {

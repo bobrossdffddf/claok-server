@@ -28,7 +28,20 @@ public struct SignatureInfo: Sendable, Equatable {
 
     public var isUrgent: Bool { secondsLeft < 2 * 86_400 }
 
+    /// Read once. The profile is inside the bundle, so it cannot change while
+    /// the app is running, and this was being called several times a second
+    /// from view bodies during a drive, each call opening the file and running
+    /// a plist parse over it.
+    nonisolated(unsafe) private static var cached: SignatureInfo??
+
     public static func fromBundle() -> SignatureInfo? {
+        if let cached { return cached }
+        let value = readBundle()
+        cached = value
+        return value
+    }
+
+    private static func readBundle() -> SignatureInfo? {
         guard let url = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
               let data = try? Data(contentsOf: url) else {
             return nil

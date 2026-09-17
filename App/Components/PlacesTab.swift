@@ -1,179 +1,203 @@
 import SwiftUI
 import MapKit
 import SwiftData
+import CoreLocation
 import CloakKit
 
-struct PlacesTab: View {
+/// The dropped pin: where it is, and what can be done with it.
+///
+/// Normally Teleport is the one accent action, with Save and Add as stop under
+/// it. Reached from the route card's Add a stop flow, that flips: Add as stop
+/// becomes the accent action and Teleport steps back, so the button the person
+/// came for is the obvious one. Saved places are not here; they are in the
+/// search card while the field is empty.
+struct PlacesCard: View {
     @Environment(AppModel.self) private var model
     @Environment(\.modelContext) private var context
-    @Binding var selection: Coordinate?
-    @Binding var tab: SheetTab
+    @Environment(\.dynamicTypeSize) private var typeSize
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    @Query(sort: \Place.lastUsedAt, order: .reverse) private var places: [Place]
-    @State private var query = ""
-    @State private var results: [MKMapItem] = []
-    @State private var searching = false
+    let chrome: CardContext
+    let coordinate: Coordinate
+    /// The name search or a tap gave this place, so a saved place or a stop
+    /// keeps it. "Dropped pin" when a bare pin was dropped on the map.
+    var name: String = "Dropped pin"
+    /// True when the pin was reached from the route card's Add a stop flow.
+    var addingStop: Bool = false
+    /// Opens another tool's card, for Add as stop.
+    var onOpen: (MapTool) -> Void
+
+    @State private var journeyTarget: Coordinate?
+    @State private var showsSaveDialog = false
+    @State private var placeName = ""
+    @State private var suggestedName: String?
+    @State private var justSaved = false
+
+    private var hasRealName: Bool {
+        name != "Dropped pin" && !name.trimmingCharacters(in: .whitespaces).isEmpty
+    }
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: Metrics.regular) {
-                searchField
-
-                if let selection {
-                    selectedCard(selection)
-                }
-
-                if !results.isEmpty {
-                    Section(title: "Search results") {
-                        ForEach(Array(results.enumerated()), id: \.offset) { index, item in
-                            Row(symbol: "magnifyingglass",
-                                title: item.name ?? "Unnamed",
-                                subtitle: item.placemark.title,
-                                showsDivider: index < results.count - 1) {
-                                Image(systemName: "arrow.up.forward")
-                                    .font(.system(.caption, weight: .semibold))
-                                    .foregroundStyle(Palette.dim)
-                            }
-                            .contentShape(.rect)
-                            .onTapGesture {
-                                guard let location = item.placemark.location else { return }
-                                let coordinate = Coordinate(location.coordinate)
-                                self.selection = coordinate
-                                Task { await model.teleport(to: coordinate, label: item.name ?? "Search result") }
-                            }
-                        }
-                    }
-                }
-
-                if places.isEmpty {
-                    EmptyNote(
-                        symbol: "mappin.and.ellipse",
-                        title: "No saved places yet",
-                        detail: "Search for somewhere, or press and hold anywhere on the map, then save it here.")
+        FloatingCard(
+            title: hasRealName ? name : "Dropped pin",
+            subtitle: String(format: "%.5f, %.5f", coordinate.latitude, coordinate.longitude),
+            onClose: chrome.onClose
+        ) {
+            VStack(spacing: Metrics.tight) {
+                if addingStop {
+                    addStopButton(primary: true)
+                    actionPair { teleportButton(primary: false); saveButton }
                 } else {
-                    Section(title: "Saved places") {
-                        ForEach(Array(places.enumerated()), id: \.element.id) { index, place in
-                            Row(symbol: place.symbolName,
-                                title: place.name,
-                                subtitle: place.subtitle.isEmpty ? nil : place.subtitle,
-                                showsDivider: index < places.count - 1) {
-                                Image(systemName: "arrow.up.forward")
-                                    .font(.system(.caption, weight: .semibold))
-                                    .foregroundStyle(Palette.dim)
-                            }
-                            .contentShape(.rect)
-                            .onTapGesture {
-                                place.markUsed()
-                                Task { await model.teleport(to: place.coordinate, label: place.name) }
-                            }
-                            .contextMenu {
-                                Button("Go here") {
-                                    place.markUsed()
-                                    Task { await model.teleport(to: place.coordinate, label: place.name) }
-                                }
-                                Button("Add as a stop") {
-                                    model.addStop(place.coordinate, title: place.name)
-                                    tab = .route
-                                }
-                                Button("Delete", role: .destructive) { context.delete(place) }
-                            }
-                        }
-                    }
+                    teleportButton(primary: true)
+                    actionPair { saveButton; addStopButton(primary: false) }
                 }
+
+                journeyRow
             }
-            .padding(.horizontal, Metrics.regular)
-            .padding(.vertical, Metrics.regular)
         }
-        .scrollDismissesKeyboard(.interactively)
+        .task(id: coordinate) {
+            if suggestedName == nil, !hasRealName {
+                suggestedName = await Self.reverseGeocodedName(coordinate)
+            }
+        }
+        .alert("Name this place", isPresented: $showsSaveDialog) {
+            TextField("Home, gym, work", text: $placeName)
+            Button("Save") { savePlace() }
+            Button("Cancel", role: .cancel) { }
+        }
+        .sheet(item: $journeyTarget) { target in JourneyView(pin: target) }
+        #if DEBUG
+        .task {
+            if ProcessInfo.processInfo.environment["CLOAK_TOUR_SAVE"] == "1" {
+                placeName = await defaultName()
+                showsSaveDialog = true
+            }
+        }
+        #endif
     }
 
-    private var searchField: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "magnifyingglass")
-                .foregroundStyle(Palette.dim)
-            TextField("Search or paste 37.3318, -122.0311", text: $query)
-                .textFieldStyle(.plain)
-                .font(.label(15))
-                .autocorrectionDisabled()
-                .textInputAutocapitalization(.never)
-                .onSubmit { Task { await search() } }
-                .onChange(of: query) { _, _ in Task { await search() } }
-            if searching {
-                ProgressView().controlSize(.mini)
-            } else if !query.isEmpty {
-                Button {
-                    query = ""
-                    results = []
-                } label: {
-                    Image(systemName: "xmark.circle.fill").foregroundStyle(Palette.dim)
-                }
-                .buttonStyle(.plain)
-            }
+    /// Two card buttons side by side, stacked at accessibility text sizes so
+    /// neither is squeezed below its label.
+    @ViewBuilder
+    private func actionPair<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        if typeSize.isAccessibilitySize {
+            VStack(spacing: Metrics.tight) { content() }
+        } else {
+            HStack(spacing: Metrics.tight) { content() }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 11)
-        .background(Palette.raised, in: .rect(cornerRadius: 13, style: .continuous))
     }
 
-    private func selectedCard(_ coordinate: Coordinate) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Eyebrow(text: "Dropped pin")
-            Text(String(format: "%.5f, %.5f", coordinate.latitude, coordinate.longitude))
-                .font(.readout(15))
-                .foregroundStyle(.white)
-
-            Button("Teleport here") {
-                Task { await model.teleport(to: coordinate, label: "Dropped pin") }
-            }
-            .buttonStyle(PrimaryButtonStyle())
-
-            HStack(spacing: 10) {
-                Button {
-                    context.insert(Place(name: "Saved place", coordinate: coordinate))
-                } label: {
-                    Label("Save", systemImage: "star")
+    private func teleportButton(primary: Bool) -> some View {
+        Button {
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            Task {
+                await model.teleport(to: coordinate, label: hasRealName ? name : "Dropped pin")
+                // Close the pin card so the running card takes its place;
+                // without this nothing on screen said the spoof had started.
+                if model.snapshot.isRunning {
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                    chrome.onClose()
                 }
-                .buttonStyle(QuietButtonStyle())
-
-                Button {
-                    model.routeWaypoints.append(
-                        RouteWaypoint(coordinate: coordinate, title: "Stop \(model.routeWaypoints.count + 1)")
-                    )
-                    tab = .route
-                } label: {
-                    Label("Add stop", systemImage: "plus")
-                }
-                .buttonStyle(QuietButtonStyle())
             }
+        } label: {
+            Label(primary ? "Teleport here" : "Teleport", systemImage: "bolt.fill")
         }
-        .padding(16)
-        .background(Palette.surface, in: .rect(cornerRadius: 18, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(Palette.hairline, lineWidth: 1)
-        )
+        .modifier(PrimaryOrSecondary(primary: primary))
     }
 
-    private func search() async {
-        let trimmed = query.trimmingCharacters(in: .whitespaces)
-        guard trimmed.count > 2 else {
-            results = []
-            return
+    private func addStopButton(primary: Bool) -> some View {
+        Button {
+            // Through the model, not straight onto the array. A direct append
+            // skipped the rebuild, so a route already built stayed on screen
+            // describing a trip without this stop in it.
+            model.addStop(coordinate, title: hasRealName ? name : "Stop \(model.routeWaypoints.count + 1)")
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            onOpen(.route)
+        } label: {
+            Label("Add as stop", systemImage: "plus")
         }
-        if let coordinate = CoordinateParser.parse(trimmed) {
-            selection = coordinate
-            results = []
-            return
+        .modifier(PrimaryOrSecondary(primary: primary))
+    }
+
+    private var saveButton: some View {
+        Button {
+            Task { placeName = await defaultName(); showsSaveDialog = true }
+        } label: {
+            Label(justSaved ? "Saved" : "Save", systemImage: justSaved ? "checkmark" : "star")
+                .contentTransition(.symbolEffect(.replace))
         }
-        searching = true
-        defer { searching = false }
-        let request = MKLocalSearch.Request()
-        request.naturalLanguageQuery = trimmed
-        if let real = model.realPosition {
-            request.region = MKCoordinateRegion(center: real.clCoordinate, latitudinalMeters: 60000, longitudinalMeters: 60000)
+        .buttonStyle(CardSecondaryButtonStyle())
+        .scaleEffect(justSaved && !reduceMotion ? 1.05 : 1)
+        .animation(reduceMotion ? nil : .bouncy(duration: 0.4), value: justSaved)
+        .accessibilityLabel("Save this place")
+    }
+
+    @ViewBuilder
+    private var journeyRow: some View {
+        if let real = model.realPosition, real.distance(to: coordinate) > 30_000 {
+            let flies = Journey.shape(for: real.distance(to: coordinate)) == .fly
+            Button {
+                journeyTarget = coordinate
+            } label: {
+                HStack(spacing: Metrics.tight) {
+                    Image(systemName: flies ? "airplane.departure" : "car")
+                        .foregroundStyle(Color(.secondaryLabel))
+                    Text(flies ? "Travel there, with a flight" : "Drive there believably")
+                        .foregroundStyle(Color(.label))
+                    Spacer(minLength: 0)
+                    RowChevron()
+                }
+                .font(.body)
+                .padding(.horizontal, Metrics.hair)
+                .frame(minHeight: 44)
+                .contentShape(.rect)
+            }
+            .buttonStyle(PressableStyle(scale: 0.98))
         }
-        guard let response = try? await MKLocalSearch(request: request).start() else { return }
-        results = Array(response.mapItems.prefix(8))
+    }
+
+    /// The name to suggest when saving: the place's own name, then a
+    /// reverse geocoded street, then a plain fallback.
+    private func defaultName() async -> String {
+        if hasRealName { return name }
+        if let suggestedName, !suggestedName.isEmpty { return suggestedName }
+        if let found = await Self.reverseGeocodedName(coordinate) { return found }
+        return "Saved place"
+    }
+
+    private func savePlace() {
+        let typed = placeName.trimmingCharacters(in: .whitespaces)
+        let final = typed.isEmpty ? (hasRealName ? name : (suggestedName ?? "Saved place")) : typed
+        context.insert(Place(name: final, coordinate: coordinate))
+        try? context.save()
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        justSaved = true
+        Task {
+            try? await Task.sleep(for: .seconds(1.4))
+            justSaved = false
+        }
+    }
+
+    /// A street or place name for a coordinate, or nil when none can be found.
+    private static func reverseGeocodedName(_ c: Coordinate) async -> String? {
+        let location = CLLocation(latitude: c.latitude, longitude: c.longitude)
+        let placemarks = try? await CLGeocoder().reverseGeocodeLocation(location)
+        guard let mark = placemarks?.first else { return nil }
+        return mark.name ?? mark.thoroughfare ?? mark.locality
+    }
+}
+
+/// Makes one card button either the accent primary or the neutral secondary,
+/// so a single label can be either depending on the flow it sits in.
+private struct PrimaryOrSecondary: ViewModifier {
+    let primary: Bool
+
+    func body(content: Content) -> some View {
+        if primary {
+            content.buttonStyle(PrimaryButtonStyle())
+        } else {
+            content.buttonStyle(CardSecondaryButtonStyle())
+        }
     }
 }
 

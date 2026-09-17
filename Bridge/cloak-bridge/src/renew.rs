@@ -1,22 +1,6 @@
-//! Renewing Cloak's signature from the phone itself.
-//!
-//! A free Apple ID signs an app for seven days. Until now the only cure was
-//! plugging the phone into the computer that installed it, which is the one
-//! thing this whole project exists to avoid. Everything needed to do it on the
-//! phone is already here: the same signing library the desktop installer uses
-//! builds for iOS, and the loopback reflector already lets the phone reach its
-//! own lockdown service, which is where AFC and the installation proxy live.
-//!
-//! So the phone asks Apple for a certificate as itself, re-signs a fresh copy
-//! of Cloak, and installs it over the reflector. No cable, no computer.
-//!
-//! Two-factor is the one part a person has to be present for, and only the
-//! first time. The signing library stores the session it gets back, so later
-//! renewals reuse it and run silently.
-
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_uchar, CStr, CString};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -25,17 +9,21 @@ use isideload::{
     anisette::remote_v3::RemoteV3AnisetteProvider,
     auth::apple_account::{AppleAccount, TwoFactorCallbackParams, TwoFactorCallbackResponse},
     dev::{developer_session::DeveloperSession, devices::DevicesApi},
-    sideload::{
-        builder::MaxCertsBehavior, install::install_app, SideloaderBuilder, TeamSelection,
-    },
+    sideload::{builder::MaxCertsBehavior, install::install_app, SideloaderBuilder, TeamSelection},
     util::storage::SideloadingStorage,
 };
 use rootcause::prelude::*;
 use tokio::sync::oneshot;
 
+use crate::signin;
+
 pub const RENEW_OK: c_int = 0;
 pub const RENEW_ERR: c_int = 1;
 pub const RENEW_ERR_BUFFER: c_int = 2;
+
+const MACHINE_KEY: &str = "cloak/machine";
+const SERIAL_KEY: &str = "cloak/anisette_serial";
+const URL_KEY: &str = "cloak/anisette_url";
 
 struct RenewSession {
     runtime: tokio::runtime::Runtime,
@@ -75,31 +63,19 @@ fn working(session: &RenewSession, phase: &str, progress: f64) {
     );
 }
 
-// MARK: - Storage
-
-/// Where the signing library keeps the Apple session and the certificate.
-///
-/// Deliberately a plain file in the app's own container rather than the
-/// keychain. The container is already private to this app, and the keychain
-/// buys nothing here while costing an entitlement a free signature cannot
-/// carry. The Apple ID password is not kept here; that is the app's business
-/// and it goes in the keychain proper.
-struct FileStorage {
+pub struct FileStorage {
     path: PathBuf,
     cache: Mutex<HashMap<String, String>>,
 }
 
 impl FileStorage {
-    fn new(dir: &str) -> Self {
+    pub fn open(dir: &str) -> Arc<Self> {
         let path = PathBuf::from(dir).join("signing-state.json");
         let cache = std::fs::read(&path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<HashMap<String, String>>(&bytes).ok())
             .unwrap_or_default();
-        Self {
-            path,
-            cache: Mutex::new(cache),
-        }
+        Arc::new(Self { path, cache: Mutex::new(cache) })
     }
 
     fn flush(&self, map: &HashMap<String, String>) {
@@ -107,14 +83,21 @@ impl FileStorage {
             let _ = std::fs::create_dir_all(parent);
         }
         if let Ok(bytes) = serde_json::to_vec(map) {
-            let _ = std::fs::write(&self.path, bytes);
+            let tmp = self.path.with_extension("tmp");
+            if std::fs::write(&tmp, bytes).is_ok() {
+                let _ = std::fs::rename(&tmp, &self.path);
+            }
         }
     }
 
-    fn clear(&self) {
+    fn clear_certificates(&self) {
         let mut map = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-        map.clear();
+        map.retain(|key, _| key.contains("anisette") || key.starts_with("cloak/"));
         self.flush(&map);
+    }
+
+    fn has(&self, key: &str) -> bool {
+        self.cache.lock().unwrap_or_else(|e| e.into_inner()).contains_key(key)
     }
 }
 
@@ -136,115 +119,333 @@ impl SideloadingStorage for FileStorage {
     }
 }
 
-// MARK: - The job
+pub struct Shared(pub Arc<FileStorage>);
+
+impl SideloadingStorage for Shared {
+    fn store(&self, key: &str, value: &str) -> Result<(), Report> {
+        self.0.store(key, value)
+    }
+
+    fn retrieve(&self, key: &str) -> Result<Option<String>, Report> {
+        self.0.retrieve(key)
+    }
+}
+
+/// The same store, with the sign-in helper's identity kept apart from every
+/// other helper's.
+///
+/// The anisette blob is minted inside one specific server, which keeps the
+/// other half of it. Handing helper B a blob that helper A produced yields a
+/// one-time code that verifies against nothing, and Apple answers with a
+/// refusal that reads like a wrong password. The desktop installer had exactly
+/// this bug; the bridge kept it.
+///
+/// Certificates and the team stay shared, because those belong to the Apple ID
+/// rather than to any server. Only the anisette keys are filed per helper.
+pub struct PerHelper {
+    inner: Arc<FileStorage>,
+    helper: String,
+}
+
+impl PerHelper {
+    pub fn new(inner: Arc<FileStorage>, helper: &str) -> Self {
+        Self { inner, helper: helper.trim_end_matches('/').to_string() }
+    }
+
+    fn scoped(&self, key: &str) -> String {
+        if key.contains("anisette") {
+            format!("{key}@{}", self.helper)
+        } else {
+            key.to_string()
+        }
+    }
+}
+
+impl SideloadingStorage for PerHelper {
+    fn store(&self, key: &str, value: &str) -> Result<(), Report> {
+        self.inner.store(&self.scoped(key), value)
+    }
+
+    fn retrieve(&self, key: &str) -> Result<Option<String>, Report> {
+        self.inner.retrieve(&self.scoped(key))
+    }
+}
+
+#[derive(serde::Deserialize, Default)]
+struct Handoff {
+    key: Option<String>,
+    der: Option<String>,
+    machine: Option<String>,
+    anisette_state: Option<String>,
+    anisette_url: Option<String>,
+    anisette_serial: Option<String>,
+}
+
+fn adopt_handoff(storage: &FileStorage, json: Option<&str>) {
+    let Some(text) = json else { return };
+    let Ok(handoff) = serde_json::from_str::<Handoff>(text) else { return };
+    if let (Some(key), Some(der)) = (handoff.key.as_deref(), handoff.der.as_deref()) {
+        if !storage.has(key) {
+            let _ = storage.store(key, der);
+        }
+    }
+    if let Some(machine) = handoff.machine.as_deref() {
+        if !storage.has(MACHINE_KEY) {
+            let _ = storage.store(MACHINE_KEY, machine);
+        }
+    }
+    // The Mac's identity blob belongs to the helper the Mac used, and only to
+    // that one. Filing it under that helper is what lets it be reused; filing
+    // it loose is what got it sent to a different server and refused.
+    if let Some(state) = handoff.anisette_state.as_deref() {
+        if let Some(url) = handoff.anisette_url.as_deref() {
+            let key = format!("anisette_state@{}", url.trim_end_matches('/'));
+            if !storage.has(&key) {
+                let _ = storage.store(&key, state);
+            }
+        }
+    }
+    if let Some(url) = handoff.anisette_url.as_deref() {
+        if !storage.has(URL_KEY) {
+            let _ = storage.store(URL_KEY, url);
+        }
+    }
+    if let Some(serial) = handoff.anisette_serial.as_deref() {
+        if !storage.has(SERIAL_KEY) {
+            let _ = storage.store(SERIAL_KEY, serial);
+        }
+    }
+}
 
 struct Job {
     apple_id: String,
     password: String,
-    ipa: PathBuf,
+    app: PathBuf,
     state_dir: String,
     pairing: Option<PairingFile>,
     address: std::net::IpAddr,
     device_name: String,
     device_udid: String,
+    handoff: Option<String>,
 }
 
 async fn run(session: Arc<RenewSession>, job: Job) {
     let outcome = renew(&session, &job).await;
     match outcome {
-        Ok(()) => set_state(&session, serde_json::json!({ "state": "done" })),
-        Err(reason) => {
-            set_state(&session, serde_json::json!({ "state": "failed", "reason": reason }))
-        }
+        Ok(expires) => set_state(&session, serde_json::json!({ "state": "done", "expires": expires })),
+        Err(reason) => set_state(&session, serde_json::json!({ "state": "failed", "reason": reason })),
     }
     *session.running.lock().unwrap_or_else(|e| e.into_inner()) = false;
 }
 
-async fn renew(session: &Arc<RenewSession>, job: &Job) -> Result<(), String> {
-    if !job.ipa.exists() {
-        return Err("The working copy of Cloak to re-sign is missing.".to_string());
+pub fn profile_expiry(app: &Path) -> Option<f64> {
+    let data = std::fs::read(app.join("embedded.mobileprovision")).ok()?;
+    let open = find(&data, b"<plist")?;
+    let close = find(&data[open..], b"</plist>")? + open + b"</plist>".len();
+    let value: plist::Value = plist::from_bytes(&data[open..close]).ok()?;
+    let date = value.as_dictionary()?.get("ExpirationDate")?.as_date()?;
+    let system: std::time::SystemTime = date.into();
+    Some(system.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs_f64())
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|window| window == needle)
+}
+
+async fn sign_in(
+    session: &Arc<RenewSession>,
+    job: &Job,
+    storage: &Arc<FileStorage>,
+) -> Result<AppleAccount, String> {
+    working(session, "Finding a working sign-in helper", 0.05);
+
+    let mut preferred = Vec::new();
+    if let Ok(Some(url)) = storage.retrieve(signin::LAST_GOOD_KEY) {
+        preferred.push(url);
+    }
+    if let Ok(Some(url)) = storage.retrieve(URL_KEY) {
+        preferred.push(url);
+    }
+    let list = signin::candidates(&preferred).await;
+    let serial = storage
+        .retrieve(SERIAL_KEY)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "0".to_string());
+
+    let mut apple_attempts = 0;
+    let mut tried = 0;
+    let mut last = String::new();
+
+    // Probe every helper at once and keep the ones that answer, in the order
+    // they were preferred. One at a time meant up to thirteen probes of six
+    // seconds each before giving up, which on a phone reads as the whole
+    // thing hanging and then refusing.
+    let (live, probe_errors) = signin::live_helpers(&list).await;
+    if live.is_empty() {
+        let detail = probe_errors
+            .iter()
+            .take(3)
+            .map(|(url, why)| format!("{url}: {why}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(if detail.is_empty() {
+            "No Apple sign-in helper answered. Check this phone's connection and try again.".to_string()
+        } else {
+            format!("No Apple sign-in helper answered. {detail}")
+        });
     }
 
-    working(session, "Reaching Apple", 0.04);
+    for helper in live {
+        if apple_attempts >= 3 || tried >= 8 {
+            break;
+        }
+        tried += 1;
+        working(session, "Signing in with your Apple ID", 0.08);
 
-    let anisette = RemoteV3AnisetteProvider::default()
-        .map_err(|e| format!("Could not start the Apple sign-in helper: {e}"))?
-        .set_serial_number("2".to_string());
-
-    working(session, "Signing in with your Apple ID", 0.08);
-
-    // Asked for only when Apple asks. After the first success the signing
-    // library has a session it can reuse, so this never fires again until
-    // Apple decides otherwise.
-    let two_factor = {
-        let session = session.clone();
-        move |params: TwoFactorCallbackParams| {
+        let two_factor = {
             let session = session.clone();
-            async move {
-                let (tx, rx) = oneshot::channel();
-                *session.code.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
-                set_state(
-                    &session,
-                    serde_json::json!({
-                        "state": "needs-code",
-                        "sms": params.sms,
-                        "unknown": params.unknown,
-                        "hint": params.last_error,
-                    }),
-                );
-                match rx.await {
-                    Ok(response) => Ok(response),
-                    Err(_) => Ok(TwoFactorCallbackResponse::Abort),
+            move |params: TwoFactorCallbackParams| {
+                let session = session.clone();
+                async move {
+                    let (tx, rx) = oneshot::channel();
+                    *session.code.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
+                    set_state(
+                        &session,
+                        serde_json::json!({
+                            "state": "needs-code",
+                            "sms": params.sms,
+                            "unknown": params.unknown,
+                            "hint": params.last_error,
+                        }),
+                    );
+                    match rx.await {
+                        Ok(response) => Ok(response),
+                        Err(_) => Ok(TwoFactorCallbackResponse::Abort),
+                    }
                 }
             }
+        };
+
+        let provider = RemoteV3AnisetteProvider::default()
+            .map_err(|e| format!("Could not start the Apple sign-in helper: {e}"))?
+            .set_url(&helper)
+            .set_storage(Box::new(PerHelper::new(storage.clone(), &helper)))
+            .set_serial_number(serial.clone());
+
+        match AppleAccount::builder(&job.apple_id)
+            .anisette_provider(signin::Identified::new(provider))
+            .login(&job.password, two_factor)
+            .await
+        {
+            Ok(account) => {
+                let _ = storage.store(signin::LAST_GOOD_KEY, &helper);
+                return Ok(account);
+            }
+            Err(error) => {
+                let text = error.to_string();
+                last = text.clone();
+                if signin::helper_broke(&text, &helper) {
+                    signin::forget_anisette(storage.as_ref());
+                    continue;
+                }
+                if signin::throttled(&text) {
+                    return Err("Apple wants a slower pace. Leave it alone for ten minutes and Cloak will try again on its own.".to_string());
+                }
+                if signin::helper_rejected(&text) {
+                    apple_attempts += 1;
+                    signin::forget_anisette(storage.as_ref());
+                    continue;
+                }
+                return Err(friendly(&text));
+            }
         }
+    }
+
+    if last.is_empty() {
+        Err("No Apple sign-in helper answered. Check this phone's connection and try again.".to_string())
+    } else {
+        Err(format!("Apple would not accept any sign-in helper. Last answer: {}", friendly(&last)))
+    }
+}
+
+async fn renew(session: &Arc<RenewSession>, job: &Job) -> Result<Option<f64>, String> {
+    if !job.app.exists() {
+        return Err("The working copy of Cloak to re-sign is missing.".to_string());
+    }
+    signin::ensure_crypto();
+
+    // The Apple-facing half of a re-sign cannot be timed from a development
+    // machine without signing in as the user, so the phone times itself. The
+    // file lands in Documents, which file sharing makes visible in the Files
+    // app, and carries phase names and durations only.
+    let log_path = Path::new(&job.state_dir)
+        .parent()
+        .unwrap_or(Path::new(&job.state_dir))
+        .join("cloak-signing-timings.log");
+    isideload::util::timing::start(&log_path);
+    // Declared first so it is dropped last and the total lands at the end of
+    // the run, whichever way the run ends.
+    let _whole = isideload::util::timing::Phase::start("TOTAL");
+
+    let storage = FileStorage::open(&job.state_dir);
+    adopt_handoff(&storage, job.handoff.as_deref());
+
+    let mut account = {
+        let _phase = isideload::util::timing::Phase::start("Apple sign-in");
+        sign_in(session, job, &storage).await?
     };
 
-    let mut account = AppleAccount::builder(&job.apple_id)
-        .anisette_provider(anisette)
-        .login(&job.password, two_factor)
-        .await
-        .map_err(|e| friendly(&e.to_string()))?;
+    let machine = storage
+        .retrieve(MACHINE_KEY)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| format!("Cloak ({})", job.device_name));
 
-    // Signing is attempted twice. A stale certificate, one this phone thinks
-    // it owns and Apple has never heard of, is the common first failure and
-    // there is nothing to tell the user about it: throw it away and ask again.
     let mut attempt = 0u8;
     let signed = loop {
         attempt += 1;
-
         working(session, "Opening your developer account", 0.18);
 
-        let developer = tokio::time::timeout(
-            std::time::Duration::from_secs(90),
-            DeveloperSession::from_account(&mut account),
-        )
-        .await
-        .map_err(|_| "Apple stopped answering. Check the connection and try again.".to_string())?
-        .map_err(|e| format!("Apple would not open a developer session: {e}"))?;
+        let developer = {
+            let _phase = isideload::util::timing::Phase::start("Open developer session");
+            tokio::time::timeout(
+                std::time::Duration::from_secs(90),
+                DeveloperSession::from_account(&mut account),
+            )
+            .await
+            .map_err(|_| {
+                "Apple stopped answering. Check the connection and try again.".to_string()
+            })?
+            .map_err(|e| format!("Apple would not open a developer session: {e}"))?
+        };
 
         let mut sideloader = SideloaderBuilder::new(developer, job.apple_id.clone())
             .team_selection(TeamSelection::First)
             .max_certs_behavior(MaxCertsBehavior::Revoke)
-            .storage(Box::new(FileStorage::new(&job.state_dir)))
-            .machine_name(format!("Cloak on {}", job.device_name))
+            .storage(Box::new(Shared(storage.clone())))
+            .machine_name(machine.clone())
             .build();
 
         working(session, "Checking your developer team", 0.24);
+        let team = {
+            let _phase = isideload::util::timing::Phase::start("Developer team");
+            sideloader
+                .get_team()
+                .await
+                .map_err(|e| format!("Apple would not say which developer team you are on: {e}"))?
+        };
 
-        let team = sideloader
-            .get_team()
-            .await
-            .map_err(|e| format!("Apple would not say which developer team you are on: {e}"))?;
-
-        sideloader
-            .get_dev_session()
-            .ensure_device_registered(&team, &job.device_name, &job.device_udid, None)
-            .await
-            .map_err(|e| friendly(&e.to_string()))?;
+        {
+            let _phase = isideload::util::timing::Phase::start("Register this device");
+            sideloader
+                .get_dev_session()
+                .ensure_device_registered(&team, &job.device_name, &job.device_udid, None)
+                .await
+                .map_err(|e| friendly(&e.to_string()))?;
+        }
 
         working(session, "Getting a signing certificate", 0.32);
-
         let progress = {
             let session = session.clone();
             move |fraction: f32| {
@@ -255,16 +456,17 @@ async fn renew(session: &Arc<RenewSession>, job: &Job) -> Result<(), String> {
             }
         };
 
+        let _phase = isideload::util::timing::Phase::start("Sign the app");
         match sideloader
-            .sign_app(job.ipa.clone(), Some(team.clone()), false, Some(progress))
+            .sign_app(job.app.clone(), Some(team.clone()), false, Some(progress))
             .await
         {
-            Ok((path, _special)) => break path,
+            Ok((path, _)) => break path,
             Err(error) => {
                 let text = error.to_string();
                 if attempt == 1 && looks_stale(&text) {
                     working(session, "Replacing an out of date certificate", 0.30);
-                    FileStorage::new(&job.state_dir).clear();
+                    storage.clear_certificates();
                     continue;
                 }
                 return Err(friendly(&text));
@@ -272,19 +474,19 @@ async fn renew(session: &Arc<RenewSession>, job: &Job) -> Result<(), String> {
         }
     };
 
-    working(session, "Installing", 0.74);
+    let expires = profile_expiry(&signed);
+    set_state(
+        session,
+        serde_json::json!({ "state": "working", "phase": "Installing", "progress": 0.74, "installing": true, "expires": expires }),
+    );
 
-    // iOS 27 refuses the phone's own lockdown port even through the reflector,
-    // but it will install over the tunnel the phone opened to itself when it
-    // paired without a computer. That tunnel is preferred when it is up; the
-    // lockdown route below is what earlier versions use.
+    let _install = isideload::util::timing::Phase::start("Install");
     match crate::rp::install_over_tunnel(signed.clone()).await {
-        Ok(()) => return Ok(()),
+        Ok(()) => return Ok(expires),
         Err(error) => {
             if job.pairing.is_none() {
                 return Err(friendly(&error));
             }
-            working(session, "Trying the pairing record route", 0.75);
         }
     }
 
@@ -297,23 +499,22 @@ async fn renew(session: &Arc<RenewSession>, job: &Job) -> Result<(), String> {
         pairing_file: pairing,
         label: "Cloak".to_string(),
     };
-
     let install_progress = {
         let session = session.clone();
         move |percent: u64| {
             let fraction = (percent as f64 / 100.0).clamp(0.0, 1.0);
-            working(&session, "Installing", 0.74 + fraction * 0.25);
+            set_state(
+                &session,
+                serde_json::json!({ "state": "working", "phase": "Installing", "progress": 0.74 + fraction * 0.25, "installing": true, "expires": expires }),
+            );
         }
     };
-
     install_app(&provider, &signed, install_progress)
         .await
         .map_err(|e| friendly(&e.to_string()))?;
-
-    Ok(())
+    Ok(expires)
 }
 
-/// Whether a signing failure is the kind a clean slate fixes.
 fn looks_stale(text: &str) -> bool {
     let lower = text.to_lowercase();
     lower.contains("7252")
@@ -322,39 +523,32 @@ fn looks_stale(text: &str) -> bool {
         || lower.contains("failed to retrieve certificate identity")
         || lower.contains("failed to revoke development certificate")
         || lower.contains("maximum number of certificates")
+        || lower.contains("reached max attempts to request certificate")
 }
 
-/// Apple's wording is for developers. This is not.
 fn friendly(raw: &str) -> String {
     let lower = raw.to_lowercase();
-    if lower.contains("-20101") || lower.contains("password") && lower.contains("incorrect") {
-        return "That Apple ID or password was not accepted.".to_string();
+    if signin::wrong_password(raw) {
+        return "That Apple ID or password was not accepted. Enter your password again to retry."
+            .to_string();
     }
     if lower.contains("maximum number of apps") || lower.contains("3 app ids") {
-        return "This Apple ID has registered as many app IDs as Apple allows. They clear on their own after a week."
-            .to_string();
+        return "This Apple ID has registered as many app IDs as Apple allows. They clear on their own after a week.".to_string();
     }
     if looks_stale(&lower) {
-        return "Apple would not issue a signing certificate. Open developer.apple.com, delete the development certificates listed there, and try again."
-            .to_string();
+        return "Apple would not issue a signing certificate. Open developer.apple.com, delete the development certificates listed there, and try again.".to_string();
     }
-    if lower.contains("afc") || lower.contains("installation") || lower.contains("lockdown") {
-        return "Cloak signed itself but could not install the new copy. Check the tunnel is running and try again."
-            .to_string();
+    if lower.contains("tunnel") || lower.contains("afc") || lower.contains("installation") || lower.contains("lockdown") {
+        return format!("Cloak signed itself but could not install the new copy. Turn LocalDevVPN on, open Cloak so it links, and try again. ({raw})");
     }
     raw.to_string()
 }
-
-// MARK: - C interface
 
 fn text(pointer: *const c_char) -> Option<String> {
     if pointer.is_null() {
         return None;
     }
-    unsafe { CStr::from_ptr(pointer) }
-        .to_str()
-        .ok()
-        .map(str::to_owned)
+    unsafe { CStr::from_ptr(pointer) }.to_str().ok().map(str::to_owned)
 }
 
 #[no_mangle]
@@ -368,8 +562,9 @@ pub extern "C" fn cloak_renew_start(
     address: *const c_char,
     device_name: *const c_char,
     device_udid: *const c_char,
+    handoff_json: *const c_char,
 ) -> c_int {
-    let (Some(apple_id), Some(password), Some(ipa), Some(state_dir), Some(address), Some(name), Some(udid)) = (
+    let (Some(apple_id), Some(password), Some(app), Some(state_dir), Some(address), Some(name), Some(udid)) = (
         text(apple_id),
         text(password),
         text(ipa_path),
@@ -385,10 +580,7 @@ pub extern "C" fn cloak_renew_start(
         None
     } else {
         let raw = unsafe { std::slice::from_raw_parts(pairing, pairing_len) };
-        match PairingFile::from_bytes(raw) {
-            Ok(file) => Some(file),
-            Err(_) => return RENEW_ERR,
-        }
+        PairingFile::from_bytes(raw).ok()
     };
 
     let Ok(addr) = address.trim().parse::<std::net::IpAddr>() else {
@@ -408,12 +600,13 @@ pub extern "C" fn cloak_renew_start(
     let job = Job {
         apple_id,
         password,
-        ipa: PathBuf::from(ipa),
+        app: PathBuf::from(app),
         state_dir,
         pairing: pairing_file,
         address: addr,
         device_name: name,
         device_udid: udid,
+        handoff: text(handoff_json),
     };
 
     let cloned = session.clone();
@@ -426,14 +619,14 @@ pub extern "C" fn cloak_renew_start(
 
 #[no_mangle]
 pub extern "C" fn cloak_renew_state(out: *mut c_char, capacity: usize) -> c_int {
-    let Some(session) = SESSION.get() else {
-        return RENEW_ERR;
-    };
     if out.is_null() {
         return RENEW_ERR;
     }
-    let text = session.state.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    let Ok(value) = CString::new(text) else {
+    let value = match SESSION.get() {
+        Some(session) => session.state.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+        None => "{\"state\":\"idle\"}".to_string(),
+    };
+    let Ok(value) = CString::new(value) else {
         return RENEW_ERR_BUFFER;
     };
     let raw = value.as_bytes_with_nul();
@@ -452,11 +645,7 @@ pub extern "C" fn cloak_renew_submit_code(code: *const c_char) -> c_int {
     let Some(value) = text(code) else {
         return RENEW_ERR;
     };
-    let sender = session
-        .code
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .take();
+    let sender = session.code.lock().unwrap_or_else(|e| e.into_inner()).take();
     match sender {
         Some(sender) => {
             let _ = sender.send(TwoFactorCallbackResponse::SubmitCode(value));

@@ -104,6 +104,59 @@ public extension DriverPersona {
         )
     }
 
+    /// How a person on their own feet moves.
+    ///
+    /// Not a driver with the numbers turned down. Feet start and stop in about
+    /// a metre, turn on the spot, and hold a pace that barely varies, so the
+    /// acceleration, the braking and the noise are all an order below a car's
+    /// and the cornering limit is high enough never to bite.
+    static let onFoot = DriverPersona(
+        id: "on-foot",
+        name: "On foot",
+        speedOffset: 0,
+        acceleration: 0.8,
+        braking: 1.2,
+        jerkLimit: 1.0,
+        lateralAcceleration: 6.0,
+        redLightProbability: 0,
+        signalDwellRange: 3...12,
+        stopSignDwellRange: 1...3,
+        speedNoise: 0.12
+    )
+
+    /// The way this persona moves in a given mode.
+    ///
+    /// A route is not one mode end to end: the drive to the airport ends on
+    /// foot. The persona is chosen once for the trip, so it is asked here for
+    /// its behaviour on whichever part of the route is under way.
+    func moving(as mode: TravelMode) -> DriverPersona {
+        switch mode {
+        case .drive:
+            return self
+        case .walk:
+            return .onFoot
+        case .run:
+            var runner = DriverPersona.onFoot
+            runner.id = "running"
+            runner.name = "Running"
+            runner.acceleration = 1.2
+            runner.braking = 1.8
+            runner.jerkLimit = 1.4
+            runner.speedNoise = 0.25
+            return runner
+        case .cycle:
+            var rider = self
+            rider.id = "cycling"
+            rider.name = "Cycling"
+            rider.acceleration = 1.2
+            rider.braking = 2.2
+            rider.jerkLimit = 1.4
+            rider.lateralAcceleration = 3.0
+            rider.speedNoise = 0.2
+            return rider
+        }
+    }
+
     static func named(_ id: String) -> DriverPersona {
         if let known = all.first(where: { $0.id == id }) { return known }
         if id.hasPrefix("shield-"), let allowance = Double(id.dropFirst(7)) {

@@ -39,6 +39,12 @@ final class ImageDelivery {
         }
     }
 
+    /// Report a failure from outside, for the case where the caller knows the
+    /// download cannot even be attempted (no trial token).
+    func markFailed(_ message: String) {
+        state = .failed(message)
+    }
+
     @discardableResult
     func fetch(token: LicenseToken?) async -> Bool {
         if isReady {

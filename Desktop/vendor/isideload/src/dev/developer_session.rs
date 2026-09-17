@@ -25,6 +25,16 @@ pub use super::device_type::DeveloperDeviceType;
 pub use super::devices::*;
 pub use super::teams::*;
 
+/// A ceiling on every request to developer.apple.com.
+///
+/// These requests had no timeout at all. Only `from_account` was wrapped, by
+/// the caller, so a request that hung (a dead tunnel, an Apple edge that
+/// accepts the connection and then says nothing) stalled the whole re-sign for
+/// as long as the OS took to give up on the socket, which is minutes. The
+/// bodies here are small plists, so this is generous for a slow cellular link
+/// rather than tight, but it is a ceiling where there was none.
+const DEV_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+
 #[derive(Clone)]
 pub struct DeveloperSession {
     token: AppToken,
@@ -119,6 +129,7 @@ impl DeveloperSession {
             let sent = self
                 .client
                 .post(url)?
+                .timeout(DEV_REQUEST_TIMEOUT)
                 .body(payload.clone())
                 .headers(headers)
                 .send()

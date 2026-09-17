@@ -30,14 +30,14 @@ struct RoutineEditor: View {
             Form {
                 SwiftUI.Section {
                     Text("A routine runs on its own all day. The phone sleeps at home, leaves near the time you set but never exactly on it, sits at work drifting a few metres the way a real one does, and comes back in the evening. No two days come out the same.")
-                        .font(.label(12))
-                        .foregroundStyle(Palette.dim)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 SwiftUI.Section("Places") {
                     if places.count < 2 {
                         Text("Save at least two places first. Search for them on the map, then save each one.")
-                            .font(.label(13))
+                            .font(.footnote)
                             .foregroundStyle(Palette.warn)
                     }
                     Picker("Home", selection: $homeID) {
@@ -58,20 +58,24 @@ struct RoutineEditor: View {
                     DatePicker("Leaves home", selection: $leave, displayedComponents: .hourAndMinute)
                     DatePicker("Leaves work", selection: $back, displayedComponents: .hourAndMinute)
 
-                    HStack(spacing: 6) {
+                    HStack(spacing: 4) {
                         ForEach(0..<7, id: \.self) { day in
                             Button {
                                 if weekdays.contains(day) { weekdays.remove(day) } else { weekdays.insert(day) }
                             } label: {
                                 Text(dayNames[day])
-                                    .font(.label(13, weight: .semibold))
-                                    .frame(maxWidth: .infinity, minHeight: 34)
-                                    .foregroundStyle(weekdays.contains(day) ? Palette.ground : .white)
+                                    .font(.footnote.weight(.semibold))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.7)
+                                    .frame(maxWidth: .infinity, minHeight: 44)
+                                    .foregroundStyle(weekdays.contains(day) ? Palette.ground : Color.primary)
                                     .background(
-                                        weekdays.contains(day) ? Palette.accent : Color.white.opacity(0.08),
-                                        in: .rect(cornerRadius: 9, style: .continuous))
+                                        weekdays.contains(day) ? AnyShapeStyle(Palette.accent) : AnyShapeStyle(.fill.tertiary),
+                                        in: .rect(cornerRadius: 10, style: .continuous))
+                                    .contentShape(.rect(cornerRadius: 10, style: .continuous))
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(PressableStyle())
+                            .accessibilityAddTraits(weekdays.contains(day) ? .isSelected : [])
                         }
                     }
                     .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
@@ -84,7 +88,7 @@ struct RoutineEditor: View {
                     VStack(alignment: .leading) {
                         HStack {
                             Text("Up to \(Int(jitter)) minutes either way")
-                                .font(.label(14))
+                                .font(.subheadline)
                             Spacer()
                         }
                         Slider(value: $jitter, in: 0...30, step: 1).tint(Palette.accent)
@@ -98,7 +102,7 @@ struct RoutineEditor: View {
                     VStack(alignment: .leading) {
                         HStack {
                             Text("Drifts up to \(Units.feet(drift))")
-                                .font(.label(14))
+                                .font(.subheadline)
                             Spacer()
                         }
                         Slider(value: $drift, in: 3...40, step: 1).tint(Palette.accent)
@@ -114,11 +118,11 @@ struct RoutineEditor: View {
                         ForEach(preview.segments) { segment in
                             HStack {
                                 Text(segment.kind.name)
-                                    .font(.label(13))
+                                    .font(.footnote)
                                 Spacer()
                                 Text(clock(segment.start))
-                                    .font(.readout(12))
-                                    .foregroundStyle(Palette.dim)
+                                    .font(.live(.caption))
+                                    .foregroundStyle(.secondary)
                             }
                         }
                     }

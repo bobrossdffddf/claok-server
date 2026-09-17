@@ -500,6 +500,56 @@ public enum RemotePairingDiscovery {
         return lines.joined(separator: " ")
     }
 
+    /// IPv6 addresses worth dialling that `localAddresses` deliberately skips.
+    ///
+    /// Measured on Bob's iPhone 17 Pro on iOS 27: this app can be refused IPv4
+    /// entirely, with every IPv4 connect and even a wildcard bind failing with
+    /// EADDRNOTAVAIL, while IPv6 works perfectly in the same instant. That
+    /// makes the IPv4-only reflector unreachable and leaves IPv6 as the only
+    /// road, so it is worth taking every IPv6 road there is.
+    ///
+    /// Two kinds are collected. Unique local addresses on the tunnel
+    /// interfaces, because a CoreDevice tunnel brings one up and that address
+    /// is a real endpoint on this phone that no other candidate covers. And
+    /// the IPv6 loopback, which has never been tried at all.
+    ///
+    /// A wrong guess costs nothing: an address nothing listens on refuses the
+    /// connection immediately rather than timing out.
+    public static func extraIPv6Candidates() -> [String] {
+        var found: [String] = []
+
+        var head: UnsafeMutablePointer<ifaddrs>?
+        if getifaddrs(&head) == 0, let first = head {
+            defer { freeifaddrs(head) }
+            for pointer in sequence(first: first, next: { $0.pointee.ifa_next }) {
+                let flags = Int32(pointer.pointee.ifa_flags)
+                guard flags & IFF_UP == IFF_UP else { continue }
+                guard let sa = pointer.pointee.ifa_addr else { continue }
+                guard sa.pointee.sa_family == UInt8(AF_INET6) else { continue }
+
+                let name = String(cString: pointer.pointee.ifa_name)
+                guard name.hasPrefix("utun") || name.hasPrefix("ipsec") else { continue }
+
+                var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                guard getnameinfo(sa, socklen_t(sa.pointee.sa_len),
+                                  &buffer, socklen_t(buffer.count),
+                                  nil, 0, NI_NUMERICHOST) == 0 else { continue }
+
+                let text = String(cString: buffer)
+                let lower = text.lowercased()
+                // Unique local only. Link-local on a tunnel goes nowhere, and
+                // a routable address belongs to whoever runs that tunnel.
+                guard lower.hasPrefix("fd") || lower.hasPrefix("fc") else { continue }
+                // Cloak's own reflector is already a named candidate.
+                guard !lower.hasPrefix("fd00:c10a") else { continue }
+                if !found.contains(text) { found.append(text) }
+            }
+        }
+
+        found.append("::1")
+        return found
+    }
+
     /// This phone's own addresses, Wi-Fi first.
     public static func localAddresses() -> [String] {
         var head: UnsafeMutablePointer<ifaddrs>?

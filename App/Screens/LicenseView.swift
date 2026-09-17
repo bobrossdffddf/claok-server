@@ -8,106 +8,110 @@ struct LicenseView: View {
 
     @State private var key = ""
     @FocusState private var focused: Bool
+    @ScaledMetric(relativeTo: .largeTitle) private var heroSize: CGFloat = 56
 
     var body: some View {
-        ZStack {
-            Palette.ground.ignoresSafeArea()
-            RadialGradient(
-                colors: [Palette.accent.opacity(0.14), .clear],
-                center: .topLeading, startRadius: 20, endRadius: 560
-            )
-            .ignoresSafeArea()
+        ScrollView {
+            VStack(spacing: Metrics.loose) {
+                VStack(spacing: Metrics.regular) {
+                    Image(systemName: "key.fill")
+                        .font(.system(size: heroSize))
+                        .symbolRenderingMode(.hierarchical)
+                        .foregroundStyle(.tint)
+                        .frame(minHeight: heroSize + 8)
+                        .accessibilityHidden(true)
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: Metrics.loose) {
-                    ZStack {
-                        Circle().fill(Palette.accent.opacity(0.13)).frame(width: 72, height: 72)
-                        Image(systemName: "key.fill")
-                            .font(.system(.title, weight: .semibold))
-                            .foregroundStyle(Palette.accent)
-                    }
+                    Text("Enter your licence")
+                        .font(.title.bold())
+                        .foregroundStyle(.primary)
+                        .multilineTextAlignment(.center)
+                        .accessibilityAddTraits(.isHeader)
 
-                    VStack(alignment: .leading, spacing: Metrics.snug) {
-                        Text("Enter your licence")
-                            .font(.label(30, weight: .bold))
-                            .foregroundStyle(.white)
+                    Text("It came with your receipt and looks like CLOAK-XXXXX-XXXXX-XXXXX-XXXXX. One licence covers one phone.")
+                        .font(.body)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
 
-                        Text("It came with your receipt and looks like CLOAK-XXXXX-XXXXX-XXXXX-XXXXX. One licence covers one phone.")
-                            .font(.label(15))
-                            .foregroundStyle(Palette.dim)
+                VStack(alignment: .leading, spacing: Metrics.tight) {
+                    TextField("CLOAK-", text: $key)
+                        .textInputAutocapitalization(.characters)
+                        .autocorrectionDisabled()
+                        .keyboardType(.asciiCapable)
+                        .textContentType(.oneTimeCode)
+                        .submitLabel(.go)
+                        .onSubmit {
+                            guard key.count >= 8, !licensing.isWorking else { return }
+                            Task { await licensing.activate(key: key) }
+                        }
+                        .font(.body.monospaced())
+                        .foregroundStyle(.primary)
+                        .focused($focused)
+                        .padding(.horizontal, Metrics.regular)
+                        .frame(minHeight: 52)
+                        .background(Palette.surface, in: .rect(cornerRadius: Metrics.radius, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: Metrics.radius, style: .continuous)
+                                .strokeBorder(focused ? Palette.accent.opacity(0.6) : Palette.hairline, lineWidth: 1)
+                        )
+
+                    if let problem = licensing.problem {
+                        Label(problem, systemImage: "exclamationmark.circle.fill")
+                            .font(.footnote)
+                            .foregroundStyle(Palette.danger)
                             .fixedSize(horizontal: false, vertical: true)
                     }
 
-                    VStack(alignment: .leading, spacing: Metrics.tight) {
-                        TextField("CLOAK-", text: $key)
-                            .textInputAutocapitalization(.characters)
-                            .autocorrectionDisabled()
-                            .keyboardType(.asciiCapable)
-                            .textContentType(.oneTimeCode)
-                            .submitLabel(.go)
-                            .onSubmit {
-                                guard key.count >= 8, !licensing.isWorking else { return }
-                                Task { await licensing.activate(key: key) }
-                            }
-                            .font(.readout(17))
-                            .foregroundStyle(.white)
-                            .focused($focused)
-                            .padding(16)
-                            .background(Palette.surface, in: .rect(cornerRadius: Metrics.radius, style: .continuous))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: Metrics.radius, style: .continuous)
-                                    .strokeBorder(focused ? Palette.accent.opacity(0.6) : Color.white.opacity(0.08), lineWidth: 1)
-                            )
-
-                        if let problem = licensing.problem {
-                            Text(problem)
-                                .font(.label(13))
-                                .foregroundStyle(Palette.danger)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-
-                    Button {
-                        Task { await licensing.activate(key: key) }
-                    } label: {
-                        if licensing.isWorking {
-                            ProgressView().tint(Palette.ground)
-                        } else {
-                            Text("Unlock Cloak")
-                        }
-                    }
-                    .buttonStyle(PrimaryButtonStyle())
-                    .disabled(key.count < 8 || licensing.isWorking)
-                    .opacity(key.count < 8 ? 0.45 : 1)
-
-                    VStack(alignment: .leading, spacing: Metrics.tight) {
-                        note("One phone at a time", "Using it on a new phone means releasing it from the old one first, in Settings.")
-                        note("It keeps working offline", "Cloak checks in occasionally and holds a fortnight's grace, so a flight or a dead server does not lock you out.")
-                    }
+                    // The field's footer, the way Settings writes one: the
+                    // two things people ask about, in plain sentences.
+                    Text("Using it on a new phone means releasing it from the old one first, in Settings. It keeps working offline: Cloak checks in occasionally and holds a fortnight's grace, so a flight or a dead server does not lock you out.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, Metrics.hair)
                 }
-                .padding(22)
             }
-            .scrollDismissesKeyboard(.interactively)
+            .padding(.horizontal, Metrics.loose)
+            .padding(.top, Metrics.loose)
+            .padding(.bottom, Metrics.loose)
         }
+        .scrollDismissesKeyboard(.interactively)
+        .scrollBounceBehavior(.basedOnSize)
+        .background(Palette.ground.ignoresSafeArea())
+        .licenseActionBar {
+            Button {
+                Task { await licensing.activate(key: key) }
+            } label: {
+                if licensing.isWorking {
+                    ProgressView().tint(Palette.ground)
+                } else {
+                    Text("Unlock Cloak").font(.headline)
+                }
+            }
+            .buttonStyle(PrimaryButtonStyle())
+            .disabled(key.count < 8 || licensing.isWorking)
+
+            Button {
+                Task { await licensing.startTrial() }
+            } label: {
+                VStack(spacing: 2) {
+                    Label("Try it free", systemImage: "gift")
+                        .font(.body)
+                    Text("10 minutes of location changing every day")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .contentShape(.rect)
+            }
+            .buttonStyle(.borderless)
+        }
+        .tint(Palette.accent)
         .preferredColorScheme(.dark)
         .onAppear { focused = true }
     }
 
-    private func note(_ title: String, _ detail: String) -> some View {
-        HStack(alignment: .top, spacing: Metrics.snug) {
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(.footnote))
-                .foregroundStyle(Palette.accent)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.label(13, weight: .semibold)).foregroundStyle(.white)
-                Text(detail).font(.label(12)).foregroundStyle(Palette.dim)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(Metrics.snug)
-        .background(Palette.surface.opacity(0.55), in: .rect(cornerRadius: 12, style: .continuous))
-    }
 }
 
 /// Shown when the licence itself is the problem, rather than a missing one.
@@ -116,29 +120,77 @@ struct LicenseRefusedView: View {
     let reason: String
 
     var body: some View {
-        ZStack {
-            Palette.ground.ignoresSafeArea()
-            VStack(spacing: Metrics.regular) {
-                Image(systemName: "lock.circle.fill")
-                    .font(.system(.largeTitle))
-                    .foregroundStyle(Palette.warn)
+        ContentUnavailableView {
+            Label {
                 Text("Cloak is locked")
-                    .font(.label(24, weight: .bold))
-                    .foregroundStyle(.white)
-                Text(reason)
-                    .font(.label(14))
-                    .foregroundStyle(Palette.dim)
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Button("Try again") { Task { await licensing.start() } }
-                    .buttonStyle(PrimaryButtonStyle())
-
-                Button("Use a different licence") { Task { await licensing.release() } }
-                    .buttonStyle(QuietButtonStyle())
+            } icon: {
+                Image(systemName: "lock.circle.fill")
+                    .foregroundStyle(Palette.warn)
             }
-            .padding(30)
+        } description: {
+            Text(reason)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Palette.ground.ignoresSafeArea())
+        .licenseActionBar {
+            Button {
+                Task { await licensing.start() }
+            } label: {
+                Text("Try again").font(.headline)
+            }
+            .buttonStyle(PrimaryButtonStyle())
+
+            Button {
+                Task { await licensing.release() }
+            } label: {
+                Text("Use a different licence")
+                    .font(.body)
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .contentShape(.rect)
+            }
+            .buttonStyle(.borderless)
+        }
+        .tint(Palette.accent)
         .preferredColorScheme(.dark)
+    }
+}
+
+// MARK: - Bottom bar
+
+private extension View {
+    /// One prominent button and one quiet one, pinned to the bottom and
+    /// riding up with the keyboard.
+    @ViewBuilder
+    func licenseActionBar<Bar: View>(@ViewBuilder _ bar: () -> Bar) -> some View {
+        let content = VStack(spacing: Metrics.hair) { bar() }
+            .padding(.horizontal, Metrics.loose)
+            .padding(.top, Metrics.snug)
+            .padding(.bottom, Metrics.tight)
+            .background { ActionBarBackdrop() }
+
+        if #available(iOS 26.0, *) {
+            safeAreaBar(edge: .bottom) { content }
+        } else {
+            safeAreaInset(edge: .bottom) {
+                content
+            }
+        }
+    }
+}
+
+/// Solid behind the bottom buttons, with a short fade above them, so text
+/// scrolled underneath never shows between a button and the keyboard or the
+/// home indicator. The edge effect alone left it readable.
+private struct ActionBarBackdrop: View {
+    var body: some View {
+        Palette.ground
+            .ignoresSafeArea(edges: .bottom)
+            .overlay(alignment: .top) {
+                LinearGradient(colors: [Palette.ground.opacity(0), Palette.ground], startPoint: .top, endPoint: .bottom)
+                    .frame(height: Metrics.loose)
+                    .offset(y: -Metrics.loose)
+            }
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
     }
 }

@@ -2,13 +2,19 @@
 
 mod agent;
 mod anisette;
+#[cfg(feature = "gui")]
 mod assets;
 mod config;
 mod device;
 mod handoff;
 mod rppair;
+mod cli;
 mod state;
+#[cfg(feature = "gui")] mod theme;
+#[cfg(feature = "gui")]
 mod ui;
+mod usbmux;
+#[cfg(feature = "gui")]
 mod viz;
 mod worker;
 
@@ -31,6 +37,15 @@ struct Args {
     /// Use a Cloak app file from somewhere other than next to this program.
     #[arg(long)]
     ipa: Option<PathBuf>,
+
+    /// Run in the terminal instead of opening a window. This is the default on
+    /// Linux, and what a Chromebook uses.
+    #[arg(long)]
+    cli: bool,
+
+    /// Print everything about why a phone will or will not talk, and stop.
+    #[arg(long)]
+    doctor: bool,
 }
 
 /// Where Cloak.ipa lives.
@@ -105,9 +120,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_writer(move || LogSink(log_path.clone()))
         .init();
     tracing::info!("Cloak Installer {} starting", env!("CARGO_PKG_VERSION"));
-    tracing::warn!("build marker: all134 v30");
+    tracing::warn!("build marker: living-cover v1");
 
     let ipa = find_ipa(args.ipa);
+
+    if args.doctor {
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+        println!("{}", runtime.block_on(device::doctor()));
+        return Ok(());
+    }
 
     if args.refresh {
         let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
@@ -134,20 +155,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
     }
 
-    let channels = worker::spawn(ipa);
+    // No window on Linux, and none when asked for, or when the GUI was not
+    // built into this binary at all (the portable Linux build).
+    let headless = args.cli || cfg!(target_os = "linux") || cfg!(not(feature = "gui"));
+    if headless {
+        std::process::exit(cli::run(ipa));
+    }
 
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([840.0, 620.0])
-            .with_min_inner_size([780.0, 560.0])
-            .with_title("Cloak Installer"),
-        ..Default::default()
-    };
-
-    eframe::run_native(
-        "Cloak Installer",
-        options,
-        Box::new(|cc| Ok(Box::new(ui::Installer::new(channels, cc)))),
-    )?;
+    #[cfg(feature = "gui")]
+    {
+        let channels = worker::spawn(ipa);
+        let options = eframe::NativeOptions {
+            viewport: egui::ViewportBuilder::default()
+                .with_inner_size([840.0, 620.0])
+                .with_min_inner_size([780.0, 560.0])
+                .with_title("Cloak Installer"),
+            ..Default::default()
+        };
+        eframe::run_native(
+            "Cloak Installer",
+            options,
+            Box::new(|cc| Ok(Box::new(ui::Installer::new(channels, cc)))),
+        )?;
+    }
     Ok(())
 }

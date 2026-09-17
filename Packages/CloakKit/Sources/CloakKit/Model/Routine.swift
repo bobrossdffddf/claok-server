@@ -52,6 +52,14 @@ public final class Routine {
     public var createdAt: Date
     public var lastRunDay: Date?
 
+    /// Real nearby places Living Cover can weave errands through, encoded so the
+    /// SwiftData model stays flat. Empty means a plain home/work routine.
+    public var errandsData: Data = Data()
+
+    /// Roughly how errand-heavy the week is. 0 is never, 1 is most days with
+    /// often two stops. This is what turns a commute into a life.
+    public var errandDensity: Double = 0.55
+
     public init(
         id: UUID = UUID(),
         name: String = "Weekday",
@@ -99,6 +107,11 @@ public final class Routine {
     }
 
     public var mode: TravelMode { TravelMode(rawValue: modeRaw) ?? .drive }
+
+    public var errands: [DiscoveredPlace] {
+        get { (try? JSONDecoder().decode([DiscoveredPlace].self, from: errandsData)) ?? [] }
+        set { errandsData = (try? JSONEncoder().encode(newValue)) ?? Data() }
+    }
 
     public var runsToday: Bool { runs(on: .now) }
 
@@ -201,12 +214,115 @@ public extension Routine {
         if arriveWork < leaveWork {
             segments.append(.init(start: arriveWork, end: leaveWork, kind: .dwell(work, name: workName, drift: dwellDrift)))
         }
-        segments.append(.init(start: max(leaveWork, arriveWork), end: arriveHome, kind: .travel(from: work, to: home, name: "To \(homeName)", mode: mode)))
-        if arriveHome < endOfDay {
-            segments.append(.init(start: arriveHome, end: endOfDay, kind: .dwell(home, name: homeName, drift: dwellDrift)))
+
+        // Living Cover: a stop or two at real places on the way home, chosen so
+        // the day differs from every other day but never does the impossible.
+        // The calendar has to be passed through. Left to default it becomes
+        // `.current`, so opening hours were judged in the time zone of the
+        // phone rather than of the place being simulated, which for a spoofer
+        // is the one time zone guaranteed to be wrong.
+        let stops = errandStops(
+            after: max(leaveWork, arriveWork),
+            from: work,
+            generator: &generator,
+            calendar: calendar
+        )
+        var cursorTime = max(leaveWork, arriveWork)
+        var cursorPlace = work
+        for stop in stops {
+            let arrive = cursorTime.addingTimeInterval(stop.travelSeconds)
+            let depart = arrive.addingTimeInterval(stop.dwellSeconds)
+            if depart >= endOfDay { break }
+            segments.append(.init(start: cursorTime, end: arrive, kind: .travel(from: cursorPlace, to: stop.coordinate, name: "To \(stop.name)", mode: mode)))
+            segments.append(.init(start: arrive, end: depart, kind: .dwell(stop.coordinate, name: stop.name, drift: max(dwellDrift, 7))))
+            cursorTime = depart
+            cursorPlace = stop.coordinate
+        }
+
+        let homeTravel = travelTime(from: cursorPlace, to: home, generator: &generator)
+        let finalArriveHome = cursorTime.addingTimeInterval(homeTravel)
+        segments.append(.init(start: cursorTime, end: finalArriveHome, kind: .travel(from: cursorPlace, to: home, name: "To \(homeName)", mode: mode)))
+        if finalArriveHome < endOfDay {
+            segments.append(.init(start: finalArriveHome, end: endOfDay, kind: .dwell(home, name: homeName, drift: dwellDrift)))
         }
 
         return RoutineDay(segments: segments)
+    }
+
+    private struct ErrandStop {
+        var name: String
+        var coordinate: Coordinate
+        var dwellSeconds: TimeInterval
+        /// How long it took to get here from the previous stop.
+        ///
+        /// Carried rather than recomputed. `travelTime` draws from the
+        /// generator, so asking for it a second time gives a different answer,
+        /// and the errand would then be placed at an hour other than the one
+        /// its plausibility was checked at. That is how a shop that closes at
+        /// eight ended up with a visit at five past nine.
+        var travelSeconds: TimeInterval
+    }
+
+    /// Picks which real places today's version of this life stops at, seeded so
+    /// a given day is always the same but no two days match. Category, time of
+    /// day and distance all gate the choice, and the same place is never
+    /// visited twice in one trip.
+    private func errandStops(after moment: Date, from origin: Coordinate, generator: inout SeededGenerator, calendar: Calendar = .current) -> [ErrandStop] {
+        let pool = errands
+        guard !pool.isEmpty, errandDensity > 0 else { return [] }
+
+        let roll = generator.double(in: 0...1)
+        let count: Int
+        if roll < (1 - errandDensity) { count = 0 }
+        else if roll < 1 - errandDensity * 0.35 { count = 1 }
+        else { count = 2 }
+        guard count > 0 else { return [] }
+
+        var chosen: [ErrandStop] = []
+        var usedNames = Set<String>()
+        var usedCategories = Set<PlaceCategory>()
+        var cursorTime = moment
+        var cursorPlace = origin
+
+        for _ in 0..<count {
+            // A candidate is plausible if the hour it would actually be reached
+            // suits it, so the choice is judged against arrival, not departure.
+            var scored: [(place: DiscoveredPlace, arrive: Date)] = []
+            for place in pool {
+                guard !usedNames.contains(place.name),
+                      !usedCategories.contains(place.category),
+                      cursorPlace.distance(to: place.coordinate) < 12_000 else { continue }
+                let travel = travelTime(from: cursorPlace, to: place.coordinate, generator: &generator)
+                let arrive = cursorTime.addingTimeInterval(travel)
+                let hour = calendar.component(.hour, from: arrive)
+                if place.category.plausible(atHour: hour) {
+                    scored.append((place, arrive))
+                }
+            }
+            guard !scored.isEmpty else { break }
+            let sorted = scored.sorted { cursorPlace.distance(to: $0.place.coordinate) < cursorPlace.distance(to: $1.place.coordinate) }
+            let window = min(sorted.count, 5)
+            let picked = sorted[generator.uniformIndex(below: window)]
+            let dwell = picked.place.category.dwellMinutes
+            let minutes = generator.double(in: dwell.lowerBound...dwell.upperBound)
+            chosen.append(ErrandStop(
+                name: picked.place.name,
+                coordinate: picked.place.coordinate,
+                dwellSeconds: minutes * 60,
+                travelSeconds: picked.arrive.timeIntervalSince(cursorTime)
+            ))
+            usedNames.insert(picked.place.name)
+            usedCategories.insert(picked.place.category)
+            cursorTime = picked.arrive.addingTimeInterval(minutes * 60)
+            cursorPlace = picked.place.coordinate
+        }
+        return chosen
+    }
+
+    private func travelTime(from: Coordinate, to: Coordinate, generator: inout SeededGenerator) -> TimeInterval {
+        let metres = from.distance(to: to)
+        let pace: Double = mode == .drive ? 12.0 : 1.35
+        return max(90, metres / pace * (1.0 + generator.double(in: -0.08...0.2)))
     }
 
     private func time(_ midnight: Date, _ hour: Int, _ minute: Int, plusMinutes: Double, calendar: Calendar) -> Date {

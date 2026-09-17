@@ -3,34 +3,43 @@ import SwiftData
 import MapKit
 import CloakKit
 
-struct RouteTab: View {
+/// The route card: where it starts, where it goes, how, and the one button
+/// that builds or drives it. One accent fill, the primary button; every row
+/// sits in a plain group.
+struct RouteCard: View {
     @Environment(AppModel.self) private var model
     @Environment(\.modelContext) private var context
     @Query(sort: \SavedRoute.createdAt, order: .reverse) private var saved: [SavedRoute]
 
-    @State private var query = ""
-    @State private var results: [MKMapItem] = []
-    @State private var searching = false
-    @State private var searchTask: Task<Void, Never>?
+    let chrome: CardContext
+    /// Puts the cursor in the search bar, which is where stops come from.
+    var onSearch: () -> Void
+    /// The same search, scoped to choosing where the route begins.
+    var onChooseStart: () -> Void
+
     @State private var showsSaveDialog = false
     @State private var routeName = ""
+    @State private var locatingStart = false
+    @State private var justSaved = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                destinationField
-
-                if !results.isEmpty {
-                    searchResults
+        FloatingCard(title: "Route", collapsible: true, onClose: chrome.onClose) {
+            if !model.routeWaypoints.isEmpty {
+                Menu {
+                    Button("Clear every stop", systemImage: "trash", role: .destructive) { model.clearStops() }
+                } label: {
+                    CardHeaderGlyph(symbol: "ellipsis")
                 }
-
-                modePicker
-
-                if model.travelMode == .drive {
-                    personaPicker
-                }
-
+                .accessibilityLabel("More")
+            }
+        } content: {
+            VStack(alignment: .leading, spacing: Metrics.regular) {
                 stops
+
+                travel
+
+                RouteChoices()
 
                 if let plan = model.activePlan, plan.waypoints.count >= 2 {
                     preview(plan)
@@ -38,308 +47,422 @@ struct RouteTab: View {
 
                 if let reading = model.believability {
                     BelievabilityCard(reading: reading)
+                        .padding(Metrics.snug)
+                        .background(
+                            // Red only when something here gives the route
+                            // away, which is meaning, not decoration.
+                            reading.tells.contains { $0.severity == .bad } ? Palette.danger.opacity(0.14) : Color.white.opacity(0.07),
+                            in: .rect(cornerRadius: CardMetrics.groupRadius, style: .continuous)
+                        )
                 }
 
-                options
+                if let rehearsal = model.rehearsal {
+                    RehearsalCard(rehearsal: rehearsal)
+                        .padding(Metrics.snug)
+                        .background(Color.white.opacity(0.07), in: .rect(cornerRadius: CardMetrics.groupRadius, style: .continuous))
+                }
 
-                actions
+                playback
 
                 if !saved.isEmpty {
                     savedRoutes
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 16)
+        } footer: {
+            CardActionBar(status: model.routeStatus) {
+                Button {
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    Task {
+                        if model.activePlan == nil {
+                            await model.previewRoute()
+                        } else {
+                            await model.startRoute()
+                        }
+                    }
+                } label: {
+                    Label(model.activePlan == nil ? "Build the route" : "Start driving",
+                          systemImage: model.activePlan == nil ? "point.topleft.down.to.point.bottomright.curvepath" : "car.fill")
+                }
+                .buttonStyle(PrimaryButtonStyle())
+                .disabled(model.routeWaypoints.count < 2 || model.isBusy)
+            } secondary: {
+                Button {
+                    routeName = model.routeWaypoints.last?.title ?? "Route"
+                    showsSaveDialog = true
+                } label: {
+                    Image(systemName: justSaved ? "checkmark" : "bookmark")
+                        .contentTransition(.symbolEffect(.replace))
+                }
+                .buttonStyle(SquareIconButtonStyle())
+                .scaleEffect(justSaved && !reduceMotion ? 1.08 : 1)
+                .animation(reduceMotion ? nil : .bouncy(duration: 0.4), value: justSaved)
+                .disabled(model.activePlan == nil)
+                .accessibilityLabel("Save this route")
+            }
         }
         .alert("Name this route", isPresented: $showsSaveDialog) {
             TextField("Morning commute", text: $routeName)
             Button("Save") { saveRoute() }
             Button("Cancel", role: .cancel) { }
         }
-    }
-
-    // MARK: - Destination search
-
-    private var destinationField: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Eyebrow(text: "Add a stop")
-            HStack(spacing: 10) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(.footnote, weight: .semibold))
-                    .foregroundStyle(Palette.dim)
-
-                TextField("Search an address or place", text: $query)
-                    .textFieldStyle(.plain)
-                    .font(.label(15))
-                    .foregroundStyle(.white)
-                    .autocorrectionDisabled()
-                    .submitLabel(.search)
-                    .onSubmit { runSearch() }
-                    .onChange(of: query) { _, _ in scheduleSearch() }
-
-                if searching {
-                    ProgressView().controlSize(.small).tint(Palette.accent)
-                } else if !query.isEmpty {
-                    Button {
-                        query = ""
-                        results = []
-                    } label: {
-                        Image(systemName: "xmark.circle.fill").foregroundStyle(Palette.dim)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-            .background(Palette.surface, in: .rect(cornerRadius: 14, style: .continuous))
-
-            Text("Or press and hold anywhere on the map.")
-                .font(.label(12))
-                .foregroundStyle(Palette.dim)
-        }
-    }
-
-    private var searchResults: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ForEach(results, id: \.self) { item in
-                Button {
-                    guard let location = item.placemark.location else { return }
-                    model.addStop(Coordinate(location.coordinate), title: item.name ?? "Stop")
-                    query = ""
-                    results = []
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                } label: {
-                    HStack(spacing: 12) {
-                        Image(systemName: "mappin.circle.fill")
-                            .font(.system(.body))
-                            .foregroundStyle(Palette.accent)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(item.name ?? "Result")
-                                .font(.label(14, weight: .medium))
-                                .foregroundStyle(.white)
-                                .lineLimit(1)
-                            if let detail = item.placemark.title {
-                                Text(detail)
-                                    .font(.label(12))
-                                    .foregroundStyle(Palette.dim)
-                                    .lineLimit(1)
-                            }
-                        }
-                        Spacer(minLength: 8)
-                        Image(systemName: "plus.circle")
-                            .foregroundStyle(Palette.accent)
-                    }
-                    .padding(.vertical, 10)
-                    .padding(.horizontal, 12)
-                    .background(Palette.surface.opacity(0.7), in: .rect(cornerRadius: 12, style: .continuous))
-                }
-                .buttonStyle(.plain)
+        #if DEBUG
+        .onAppear {
+            if ProcessInfo.processInfo.environment["CLOAK_TOUR_SAVE"] == "1" {
+                routeName = model.routeWaypoints.last?.title ?? "Route"
+                showsSaveDialog = true
             }
         }
-    }
-
-    private func scheduleSearch() {
-        searchTask?.cancel()
-        guard query.trimmingCharacters(in: .whitespaces).count >= 3 else {
-            results = []
-            return
-        }
-        searchTask = Task {
-            try? await Task.sleep(for: .milliseconds(350))
-            guard !Task.isCancelled else { return }
-            await performSearch()
-        }
-    }
-
-    private func runSearch() {
-        searchTask?.cancel()
-        Task { await performSearch() }
-    }
-
-    private func performSearch() async {
-        let text = query.trimmingCharacters(in: .whitespaces)
-        guard !text.isEmpty else { return }
-
-        searching = true
-        defer { searching = false }
-
-        let request = MKLocalSearch.Request()
-        request.naturalLanguageQuery = text
-        if let anchor = model.routeWaypoints.last?.coordinate ?? model.realPosition {
-            request.region = MKCoordinateRegion(
-                center: anchor.clCoordinate,
-                latitudinalMeters: 60_000,
-                longitudinalMeters: 60_000
-            )
-        }
-
-        let response = try? await MKLocalSearch(request: request).start()
-        guard !Task.isCancelled else { return }
-        results = Array((response?.mapItems ?? []).prefix(6))
+        #endif
     }
 
     // MARK: - Stops
 
+    /// Start, any stops between, destination. The first waypoint is where the
+    /// drive begins and the last is where it ends, so with a single stop the
+    /// question is which end it is: the phone's own position is the start,
+    /// anything else is somewhere to go.
+    @ViewBuilder
     private var stops: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Eyebrow(text: "Stops")
-                Spacer()
-                if !model.routeWaypoints.isEmpty {
-                    Button("Clear") { model.clearStops() }
-                        .font(.label(12, weight: .semibold))
-                        .foregroundStyle(Palette.danger)
+        let waypoints = model.routeWaypoints
+        CardGroup {
+            if waypoints.isEmpty {
+                startFromHereRow
+                GroupDivider(inset: 48)
+                destinationPlaceholder
+            } else if waypoints.count == 1 {
+                if startsHere {
+                    stopRow(waypoints[0], index: 0, role: .start)
+                    GroupDivider(inset: 48)
+                    destinationPlaceholder
+                } else {
+                    startFromHereRow
+                    GroupDivider(inset: 48)
+                    stopRow(waypoints[0], index: 0, role: .destination)
+                    GroupDivider(inset: 48)
+                    addStopRow
+                }
+            } else {
+                ForEach(Array(waypoints.enumerated()), id: \.element.id) { index, waypoint in
+                    if index > 0 { GroupDivider(inset: 48) }
+                    stopRow(waypoint, index: index, role: index == 0 ? .start : (index == waypoints.count - 1 ? .destination : .middle))
+                        .transition(.opacity)
+                }
+                GroupDivider(inset: 48)
+                addStopRow
+            }
+        }
+        .animation(.snappy(duration: 0.3), value: waypoints.map(\.id))
+    }
+
+    /// The always available way to add another stop, at the foot of the list.
+    /// It opens search scoped to adding a stop, so the results lead with Add a
+    /// stop and a place chosen there lands in the route.
+    private var addStopRow: some View {
+        Button(action: onSearch) {
+            CardRow(value: "Add a stop") {
+                Image(systemName: "plus.circle.fill")
+                    .font(.title3)
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(Palette.accent)
+                    .frame(width: 20)
+                    .accessibilityHidden(true)
+            }
+        }
+        .buttonStyle(RowButtonStyle())
+        .accessibilityLabel("Add a stop")
+        .accessibilityHint("Opens search to add another stop to the route")
+    }
+
+    private enum StopRole { case start, middle, destination }
+
+    private func stopRow(_ waypoint: RouteWaypoint, index: Int, role: StopRole) -> some View {
+        let isHere = role == .start && startsHere
+        let caption: String?
+        switch role {
+        case .start: caption = "Start"
+        case .middle: caption = nil
+        case .destination: caption = "Destination"
+        }
+        return CardRow(
+            caption: caption,
+            value: isHere ? "Where I am" : waypoint.title
+        ) {
+            switch role {
+            case .start: RouteDot(color: Palette.ok)
+            case .destination: RouteDot(color: Palette.danger)
+            case .middle:
+                Text("\(index + 1)")
+                    .font(.live(.caption2))
+                    .foregroundStyle(Color(.secondaryLabel))
+                    .frame(width: 20, height: 20)
+                    .accessibilityHidden(true)
+            }
+        } trailing: {
+            HStack(spacing: 0) {
+                if role == .destination, let plan = model.activePlan {
+                    Text(TripFormat.duration(plan.expectedTravelTime))
+                        .font(.live(.subheadline))
+                        .foregroundStyle(Color(.secondaryLabel))
+                        .lineLimit(1)
+                        .fixedSize()
+                        .padding(.trailing, Metrics.hair)
+                }
+                if role == .start {
+                    startMenu
+                }
+                RowIconButton(symbol: "minus.circle", label: "Remove \(waypoint.title)") {
+                    model.removeStop(waypoint)
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
                 }
             }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(caption.map { "\($0), \(isHere ? "Where I am" : waypoint.title)" } ?? "Stop \(index + 1), \(waypoint.title)")
+    }
 
-            if model.routeWaypoints.isEmpty {
-                emptyStops
-            }
-
-            ForEach(Array(model.routeWaypoints.enumerated()), id: \.element.id) { index, waypoint in
-                HStack(spacing: 12) {
-                    ZStack {
-                        Circle()
-                            .fill(index == 0 ? Palette.ok : (index == model.routeWaypoints.count - 1 ? Palette.accent : Palette.raised))
-                            .frame(width: 26, height: 26)
-                        Text("\(index + 1)")
-                            .font(.readout(12, weight: .bold))
-                            .foregroundStyle(index == 0 || index == model.routeWaypoints.count - 1 ? Palette.ground : .white)
-                    }
-
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(waypoint.title)
-                            .font(.label(14))
-                            .foregroundStyle(.white)
-                            .lineLimit(1)
-                        Text(String(format: "%.5f, %.5f", waypoint.coordinate.latitude, waypoint.coordinate.longitude))
-                            .font(.readout(11, weight: .regular))
-                            .foregroundStyle(Palette.dim)
-                    }
-
-                    Spacer(minLength: 4)
-
-                    Button {
-                        model.removeStop(waypoint)
-                    } label: {
-                        Image(systemName: "minus.circle.fill").foregroundStyle(Palette.dim)
-                    }
-                    .buttonStyle(.plain)
+    /// The row for a route with no start of its own.
+    ///
+    /// Building or driving inserts the real position as the first stop, so the
+    /// row says that outright rather than leaving it to be discovered, and the
+    /// whole row is a menu: pin it now, or go and choose somewhere else. It
+    /// used to be a bare navigation arrow with no label, which nobody pressed.
+    private var startFromHereRow: some View {
+        Menu {
+            startOptions
+        } label: {
+            CardRow(caption: "Start", value: "Where I am", detail: "Tap to change") {
+                RouteDot(color: Palette.ok)
+            } trailing: {
+                if locatingStart {
+                    ProgressView().frame(width: 44, height: 44)
+                } else {
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color(.secondaryLabel))
+                        .frame(width: 44, height: 44)
+                        .accessibilityHidden(true)
                 }
-                .padding(.vertical, 9)
-                .padding(.horizontal, 12)
-                .background(Palette.surface.opacity(0.6), in: .rect(cornerRadius: 12, style: .continuous))
             }
+        }
+        .buttonStyle(RowButtonStyle())
+        .disabled(locatingStart)
+        .accessibilityLabel("Start, where I am")
+        .accessibilityHint("Choose where the route begins")
+    }
+
+    /// On a start that is already a place, the same two choices behind one
+    /// grey control, beside the remove button.
+    private var startMenu: some View {
+        Menu {
+            startOptions
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .font(.body.weight(.semibold))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(Color(.secondaryLabel))
+                .frame(width: 44, height: 44)
+                .contentShape(.rect)
+        }
+        .accessibilityLabel("Change the start")
+    }
+
+    @ViewBuilder
+    private var startOptions: some View {
+        if !startsHere {
+            Button("Use where I am", systemImage: "location.fill") { startFromHere() }
+        }
+        Button("Choose a different start", systemImage: "magnifyingglass") { onChooseStart() }
+    }
+
+    private var destinationPlaceholder: some View {
+        Button(action: onSearch) {
+            CardRow(caption: "Destination", value: "Search, or hold the map", valueColor: Color(.secondaryLabel)) {
+                RouteDot(color: Palette.danger)
+            }
+        }
+        .buttonStyle(RowButtonStyle())
+        .accessibilityHint("Opens search to choose where the route goes")
+    }
+
+    private func startFromHere() {
+        guard !locatingStart else { return }
+        locatingStart = true
+        Task {
+            let placed = await model.startFromRealPosition()
+            locatingStart = false
+            if placed { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
         }
     }
 
-    private var emptyStops: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("No stops yet")
-                .font(.label(14, weight: .medium))
-                .foregroundStyle(.white)
-            Text("Search above, or press and hold the map. The first stop is where the drive begins, the last is where it ends.")
-                .font(.label(12))
-                .foregroundStyle(Palette.dim)
-                .fixedSize(horizontal: false, vertical: true)
+    /// True when the route already begins on the phone's own position.
+    private var startsHere: Bool {
+        guard let real = model.realPosition, let first = model.routeWaypoints.first else { return false }
+        return first.coordinate.distance(to: real) < AppModel.sameSpot
+    }
 
-            if let real = model.realPosition {
-                Button {
-                    model.addStop(real, title: "Where I am")
-                } label: {
-                    Label("Start from where I am", systemImage: "location.fill")
+    // MARK: - How
+
+    private var travel: some View {
+        VStack(alignment: .leading, spacing: Metrics.tight) {
+            Picker("Mode", selection: Binding(get: { model.travelMode }, set: { model.travelMode = $0 })) {
+                ForEach(TravelMode.allCases) { mode in
+                    Text(mode.displayName).tag(mode)
                 }
-                .buttonStyle(QuietButtonStyle())
-                .padding(.top, 4)
+            }
+            .pickerStyle(.segmented)
+
+            if model.travelMode == .drive {
+                CardGroup {
+                    // One row with the choice in a menu. The offset against
+                    // the limit is in each menu item, where it is read at the
+                    // moment of choosing, instead of a sentence under the row.
+                    Menu {
+                        Picker("Driver", selection: Binding(
+                            get: { model.persona.id },
+                            set: { id in
+                                if let persona = DriverPersona.all.first(where: { $0.id == id }) {
+                                    model.persona = persona
+                                }
+                            }
+                        )) {
+                            ForEach(DriverPersona.all) { persona in
+                                Text("\(persona.name), limit \(offsetMph(persona)) mph").tag(persona.id)
+                            }
+                        }
+                    } label: {
+                        CardRow(value: "Driver") {
+                            Image(systemName: "steeringwheel")
+                                .foregroundStyle(Color(.secondaryLabel))
+                                .frame(width: 24)
+                        } trailing: {
+                            HStack(spacing: Metrics.hair) {
+                                Text(model.persona.name)
+                                    .foregroundStyle(Color(.secondaryLabel))
+                                Image(systemName: "chevron.up.chevron.down")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(Color(.tertiaryLabel))
+                            }
+                            .padding(.trailing, Metrics.tight)
+                        }
+                    }
+                    .buttonStyle(RowButtonStyle())
+                    .accessibilityLabel("Driver")
+                    .accessibilityValue(model.persona.name)
+                }
+                .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Palette.surface.opacity(0.5), in: .rect(cornerRadius: 14, style: .continuous))
+        .animation(.snappy(duration: 0.25), value: model.travelMode)
     }
 
     // MARK: - Preview
 
     private func preview(_ plan: RoutePlan) -> some View {
-        HStack(spacing: 0) {
-            metric(title: "Distance", value: distanceText(plan))
-            divider
-            metric(title: "Drive time", value: durationText(plan.expectedTravelTime))
-            divider
-            metric(title: "At \(String(format: "%.2gx", model.playbackRate))", value: durationText(plan.expectedTravelTime / max(model.playbackRate, 0.1)))
+        VStack(alignment: .leading, spacing: Metrics.snug) {
+            HStack(spacing: 0) {
+                metric(title: "Distance", value: Units.distance(plan.polyline.length))
+                divider
+                metric(title: "Drive time", value: TripFormat.duration(plan.expectedTravelTime))
+                divider
+                metric(title: "At \(String(format: "%.2gx", model.playbackRate))", value: TripFormat.duration(plan.expectedTravelTime / max(model.playbackRate, 0.1)))
+            }
+
+            RouteRibbon(plan: plan)
         }
-        .padding(.vertical, 14)
-        .background(Palette.accent.opacity(0.08), in: .rect(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(Palette.accent.opacity(0.3), lineWidth: 1)
-        )
+        .padding(Metrics.snug)
+        .background(Color.white.opacity(0.07), in: .rect(cornerRadius: CardMetrics.groupRadius, style: .continuous))
     }
 
     private var divider: some View {
-        Rectangle().fill(Palette.hairline).frame(width: 1, height: 26)
+        Divider().frame(height: 28)
     }
 
     private func metric(title: String, value: String) -> some View {
-        VStack(spacing: 3) {
-            Text(value).font(.readout(17, weight: .semibold)).foregroundStyle(.white)
-            Text(title).font(.label(11)).foregroundStyle(Palette.dim)
+        VStack(spacing: 2) {
+            Text(value)
+                .font(.live(.body))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+            RowCaption(text: title)
+                .multilineTextAlignment(.center)
+                .minimumScaleFactor(0.8)
         }
         .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .combine)
     }
 
-    private func distanceText(_ plan: RoutePlan) -> String {
-        let metres = plan.polyline.length
-        let miles = metres / 1609.34
-        return miles < 0.2
-            ? String(format: "%.0f ft", metres * 3.28084)
-            : String(format: "%.1f mi", miles)
-    }
+    // MARK: - Playback
 
-    private func durationText(_ seconds: TimeInterval) -> String {
-        let total = Int(seconds.rounded())
-        let hours = total / 3600
-        let minutes = (total % 3600) / 60
-        if hours > 0 { return "\(hours)h \(minutes)m" }
-        if minutes > 0 { return "\(minutes) min" }
-        return "\(total)s"
-    }
-
-    // MARK: - Actions
-
-    private var actions: some View {
-        VStack(spacing: 10) {
-            if let status = model.routeStatus {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small).tint(Palette.accent)
-                    Text(status).font(.label(13)).foregroundStyle(Palette.accent)
-                    Spacer()
-                }
+    private var playback: some View {
+        CardGroup {
+            Toggle(isOn: Binding(get: { model.loopRoute }, set: { model.loopRoute = $0 })) {
+                Text("Loop the route").font(.body).foregroundStyle(Color(.label))
             }
+            .tint(Palette.accent)
+            .padding(.horizontal, 14)
+            .frame(minHeight: 52)
 
-            Button(model.activePlan == nil ? "Build the route" : "Start driving") {
-                Task {
-                    if model.activePlan == nil {
-                        await model.previewRoute()
-                    } else {
-                        await model.startRoute()
+            GroupDivider()
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    RowCaption(text: "Playback speed")
+                    Spacer()
+                    Text(String(format: "%.2fx", model.playbackRate))
+                        .font(.live(.subheadline))
+                        .foregroundStyle(.secondary)
+                }
+                Slider(
+                    value: Binding(get: { model.playbackRate }, set: { model.playbackRate = $0 }),
+                    in: 0.25...8,
+                    step: 0.25
+                )
+                .tint(Color(.label))
+                .accessibilityLabel("Playback speed")
+                .accessibilityValue(String(format: "%.2f times", model.playbackRate))
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, Metrics.tight)
+        }
+    }
+
+    // MARK: - Saved
+
+    private var savedRoutes: some View {
+        CardGroup(title: "Saved routes") {
+            ForEach(Array(saved.enumerated()), id: \.element.id) { index, route in
+                if index > 0 { GroupDivider(inset: 52) }
+                Button {
+                    load(route)
+                } label: {
+                    CardRow(value: route.name) {
+                        Image(systemName: route.mode.symbolName)
+                            .foregroundStyle(Color(.secondaryLabel))
+                            .frame(width: 24)
+                    } trailing: {
+                        Text("\(route.waypoints.count) stops")
+                            .font(.subheadline)
+                            .foregroundStyle(Color(.secondaryLabel))
+                            .padding(.trailing, Metrics.tight)
+                    }
+                }
+                .buttonStyle(RowButtonStyle())
+                .contextMenu {
+                    Button("Load this route", systemImage: "arrow.down.circle") { load(route) }
+                    Button("Delete", systemImage: "trash", role: .destructive) {
+                        context.delete(route)
+                        try? context.save()
                     }
                 }
             }
-            .buttonStyle(PrimaryButtonStyle())
-            .disabled(model.routeWaypoints.count < 2 || model.isBusy)
-            .opacity(model.routeWaypoints.count < 2 || model.isBusy ? 0.5 : 1)
-
-            if model.activePlan != nil {
-                Button {
-                    routeName = model.routeWaypoints.last?.title ?? "Route"
-                    showsSaveDialog = true
-                } label: {
-                    Label("Save this route", systemImage: "bookmark")
-                }
-                .buttonStyle(QuietButtonStyle())
-            }
         }
+    }
+
+    private func load(_ route: SavedRoute) {
+        model.routeWaypoints = route.waypoints
+        model.travelMode = route.mode
+        model.routeInputsChanged(needsNewRoute: true)
     }
 
     private func saveRoute() {
@@ -348,133 +471,15 @@ struct RouteTab: View {
         context.insert(SavedRoute(name: name, mode: model.travelMode, personaID: model.persona.id, waypoints: model.routeWaypoints))
         try? context.save()
         model.banner = "Saved \(name)."
-    }
-
-    // MARK: - Pickers
-
-    private var modePicker: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Eyebrow(text: "Mode")
-            HStack(spacing: 8) {
-                ForEach(TravelMode.allCases) { mode in
-                    Button {
-                        model.travelMode = mode
-                        model.activePlan = nil
-                    } label: {
-                        VStack(spacing: 5) {
-                            Image(systemName: mode.symbolName)
-                                .font(.system(.subheadline, weight: .semibold))
-                            Text(mode.displayName).font(.label(11, weight: .semibold))
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 11)
-                        .foregroundStyle(model.travelMode == mode ? Palette.ground : .white)
-                        .background(
-                            model.travelMode == mode ? Palette.accent : Palette.raised,
-                            in: .rect(cornerRadius: 12, style: .continuous)
-                        )
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
+        justSaved = true
+        Task {
+            try? await Task.sleep(for: .seconds(1.4))
+            justSaved = false
         }
     }
 
-    private var personaPicker: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Eyebrow(text: "Driver")
-            HStack(spacing: 8) {
-                ForEach(DriverPersona.all) { persona in
-                    Button {
-                        model.persona = persona
-                    } label: {
-                        VStack(spacing: 3) {
-                            Text(persona.name).font(.label(13, weight: .semibold))
-                            Text(offsetLabel(persona))
-                                .font(.readout(11, weight: .regular))
-                                .opacity(0.75)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .foregroundStyle(model.persona.id == persona.id ? Palette.ground : .white)
-                        .background(
-                            model.persona.id == persona.id ? Palette.accent : Palette.raised,
-                            in: .rect(cornerRadius: 12, style: .continuous)
-                        )
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-        }
-    }
-
-    private var options: some View {
-        VStack(spacing: 12) {
-            HStack {
-                Text("Loop the route").font(.label(15)).foregroundStyle(.white)
-                Spacer()
-                Toggle("", isOn: Binding(get: { model.loopRoute }, set: { model.loopRoute = $0 }))
-                    .labelsHidden()
-                    .tint(Palette.accent)
-            }
-
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Text("Playback speed").font(.label(15)).foregroundStyle(.white)
-                    Spacer()
-                    Text(String(format: "%.2fx", model.playbackRate))
-                        .font(.readout(14))
-                        .foregroundStyle(Palette.accent)
-                }
-                Slider(
-                    value: Binding(get: { model.playbackRate }, set: { model.playbackRate = $0 }),
-                    in: 0.25...8,
-                    step: 0.25
-                )
-                .tint(Palette.accent)
-            }
-        }
-        .padding(14)
-        .background(Palette.surface, in: .rect(cornerRadius: 16, style: .continuous))
-    }
-
-    private var savedRoutes: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Eyebrow(text: "Saved routes")
-            ForEach(saved) { route in
-                Button {
-                    model.routeWaypoints = route.waypoints
-                    model.travelMode = route.mode
-                    model.activePlan = nil
-                } label: {
-                    HStack(spacing: 12) {
-                        Image(systemName: route.mode.symbolName)
-                            .foregroundStyle(Palette.accent)
-                        Text(route.name).font(.label(14)).foregroundStyle(.white)
-                        Spacer()
-                        Text("\(route.waypoints.count) stops")
-                            .font(.label(12))
-                            .foregroundStyle(Palette.dim)
-                    }
-                    .padding(.vertical, 10)
-                    .padding(.horizontal, 12)
-                    .background(Palette.surface.opacity(0.6), in: .rect(cornerRadius: 12, style: .continuous))
-                }
-                .buttonStyle(.plain)
-                .swipeActions {
-                    Button(role: .destructive) {
-                        context.delete(route)
-                        try? context.save()
-                    } label: {
-                        Label("Delete", systemImage: "trash")
-                    }
-                }
-            }
-        }
-    }
-
-    private func offsetLabel(_ persona: DriverPersona) -> String {
+    private func offsetMph(_ persona: DriverPersona) -> String {
         let mph = Int(Speed.toMph(persona.speedOffset).rounded())
-        return mph >= 0 ? "limit +\(mph)" : "limit \(mph)"
+        return mph >= 0 ? "+\(mph)" : "\(mph)"
     }
 }

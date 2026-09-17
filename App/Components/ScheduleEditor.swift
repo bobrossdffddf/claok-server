@@ -65,20 +65,24 @@ struct ScheduleEditor: View {
                 SwiftUI.Section("When") {
                     DatePicker("Time", selection: $time, displayedComponents: .hourAndMinute)
 
-                    HStack(spacing: 6) {
+                    HStack(spacing: 4) {
                         ForEach(0..<7, id: \.self) { day in
                             Button {
                                 if weekdays.contains(day) { weekdays.remove(day) } else { weekdays.insert(day) }
                             } label: {
                                 Text(dayNames[day])
-                                    .font(.label(13, weight: .semibold))
-                                    .frame(maxWidth: .infinity, minHeight: 34)
-                                    .foregroundStyle(weekdays.contains(day) ? Palette.ground : .white)
+                                    .font(.footnote.weight(.semibold))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.7)
+                                    .frame(maxWidth: .infinity, minHeight: 44)
+                                    .foregroundStyle(weekdays.contains(day) ? Palette.ground : Color.primary)
                                     .background(
-                                        weekdays.contains(day) ? Palette.accent : Color.white.opacity(0.08),
-                                        in: .rect(cornerRadius: 9, style: .continuous))
+                                        weekdays.contains(day) ? AnyShapeStyle(Palette.accent) : AnyShapeStyle(.fill.tertiary),
+                                        in: .rect(cornerRadius: 10, style: .continuous))
+                                    .contentShape(.rect(cornerRadius: 10, style: .continuous))
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(PressableStyle())
+                            .accessibilityAddTraits(weekdays.contains(day) ? .isSelected : [])
                         }
                     }
                     .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
@@ -86,8 +90,8 @@ struct ScheduleEditor: View {
                     if weekdays.isEmpty {
                         DatePicker("On", selection: $onceOn, in: Date.now..., displayedComponents: .date)
                         Text("Pick days above to repeat this every week instead.")
-                            .font(.label(12))
-                            .foregroundStyle(Palette.dim)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
 
@@ -107,9 +111,9 @@ struct ScheduleEditor: View {
                 }
 
                 SwiftUI.Section {
-                    Text("Cloak starts this itself while it is running. If it has been shut down, you get a notification a minute beforehand instead — iOS will not let a sideloaded app wake up on its own.")
-                        .font(.label(12))
-                        .foregroundStyle(Palette.dim)
+                    Text("Cloak starts this itself while it is running. If it has been shut down, you get a notification a minute beforehand instead, because iOS will not let a sideloaded app wake up on its own.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
             .navigationTitle(existing == nil ? "New schedule" : "Edit schedule")

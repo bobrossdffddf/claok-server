@@ -9,6 +9,12 @@ public enum SimulationMode: Equatable, Sendable, Codable {
     /// A real drive, reported no faster than the limit allows.
     case shield(ShieldSettings.Mode)
 
+    /// SHIELD needs the real drive fed to it; nothing else does.
+    public var isShield: Bool {
+        if case .shield = self { return true }
+        return false
+    }
+
     public var isMoving: Bool {
         switch self {
         case .idle, .fixed: false
@@ -40,7 +46,15 @@ public struct SimulationSnapshot: Equatable, Sendable, Codable {
     public var reconnectCount: Int
     public var stopsMade: Int
     public var nextStopDistance: Double?
+    /// The posted limit where the simulation is right now, when there is one.
+    ///
+    /// Only ever set while driving. A walking stretch has a pace, not a limit,
+    /// and reporting the pace here would have every display in the app draw a
+    /// 3 mph speed limit sign for the walk to the terminal door.
     public var speedLimit: Double?
+    /// What the simulation is doing at this moment, which on a route with
+    /// walking legs is not the same as the mode the whole route was asked for.
+    public var travelMode: TravelMode?
     public var linkMessage: String?
     /// SHIELD only: how far the real phone is ahead of what is reported.
     public var shieldHoldingBack: Double?
@@ -65,6 +79,7 @@ public struct SimulationSnapshot: Equatable, Sendable, Codable {
         stopsMade: Int = 0,
         nextStopDistance: Double? = nil,
         speedLimit: Double? = nil,
+        travelMode: TravelMode? = nil,
         linkMessage: String? = nil
     ) {
         self.isRunning = isRunning
@@ -79,6 +94,7 @@ public struct SimulationSnapshot: Equatable, Sendable, Codable {
         self.stopsMade = stopsMade
         self.nextStopDistance = nextStopDistance
         self.speedLimit = speedLimit
+        self.travelMode = travelMode
         self.linkMessage = linkMessage
     }
 

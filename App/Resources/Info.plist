@@ -36,6 +36,43 @@
 	<key>LSApplicationQueriesSchemes</key>
 	<array>
 		<string>localdevvpn</string>
+		<string>shortcuts</string>
+		<string>protonvpn</string>
+		<string>nordvpn</string>
+		<string>mullvad</string>
+		<string>expressvpn</string>
+		<string>surfshark</string>
+		<string>windscribe</string>
+		<string>cyberghost</string>
+		<string>piavpn</string>
+		<string>ipvanish</string>
+		<string>hotspotshield</string>
+		<string>tunnelbear</string>
+		<string>nortonvpn</string>
+		<string>ivpn</string>
+		<string>openvpn</string>
+		<string>wireguard</string>
+		<string>tailscale</string>
+		<string>App-prefs</string>
+		<string>life360</string>
+		<string>findmy</string>
+		<string>com.nianticlabs.pokemongo</string>
+		<string>tinder</string>
+		<string>hinge</string>
+		<string>bumble</string>
+		<string>grindr</string>
+		<string>snapchat</string>
+		<string>uber</string>
+		<string>lyft</string>
+		<string>doordash</string>
+		<string>strava</string>
+		<string>venmo</string>
+		<string>cashapp</string>
+		<string>paypal</string>
+		<string>nflx</string>
+		<string>disneyplus</string>
+		<string>hulu</string>
+		<string>instagram</string>
 	</array>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
@@ -68,6 +105,12 @@
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>location</string>
+		<string>fetch</string>
+		<string>processing</string>
+	</array>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>app.cloak.renew</string>
 	</array>
 	<key>UIFileSharingEnabled</key>
 	<true/>
