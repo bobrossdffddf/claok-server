@@ -6,7 +6,7 @@ description = "Licences and update checks for Cloak."
 
 [dependencies]
 axum = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "fs", "process"] }
 tower-http = { version = "0.6", features = ["trace", "cors", "limit"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }

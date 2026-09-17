@@ -71,6 +71,22 @@ impl Store {
                  url      TEXT NOT NULL,
                  notes    TEXT NOT NULL DEFAULT '',
                  required INTEGER NOT NULL DEFAULT 0
+             );
+
+             CREATE TABLE IF NOT EXISTS trial_usage (
+                 device_id    TEXT NOT NULL,
+                 day          TEXT NOT NULL,
+                 used         INTEGER NOT NULL DEFAULT 0,
+                 active_since INTEGER,
+                 last_tick    INTEGER,
+                 ip           TEXT NOT NULL DEFAULT '',
+                 PRIMARY KEY (device_id, day)
+             );
+
+             CREATE TABLE IF NOT EXISTS trial_devices (
+                 device_id  TEXT PRIMARY KEY,
+                 tz_minutes INTEGER NOT NULL DEFAULT 0,
+                 first_seen INTEGER NOT NULL
              );",
         )?;
         Ok(Self { connection: Arc::new(Mutex::new(connection)) })
@@ -229,6 +245,68 @@ impl Store {
                 ],
             )?;
             Ok(())
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TrialRow {
+    pub used: i64,
+    pub active_since: Option<i64>,
+    pub last_tick: Option<i64>,
+}
+
+impl Store {
+    pub fn trial_timezone(&self, device: &str, offered: i64) -> rusqlite::Result<i64> {
+        self.with(|c| {
+            c.execute(
+                "INSERT OR IGNORE INTO trial_devices (device_id, tz_minutes, first_seen) VALUES (?1, ?2, ?3)",
+                params![device, offered.clamp(-840, 840), now()],
+            )?;
+            c.query_row("SELECT tz_minutes FROM trial_devices WHERE device_id = ?1", params![device], |row| row.get(0))
+        })
+    }
+
+    pub fn trial_row(&self, device: &str, day: &str) -> rusqlite::Result<TrialRow> {
+        self.with(|c| {
+            let mut statement = c.prepare("SELECT used, active_since, last_tick FROM trial_usage WHERE device_id = ?1 AND day = ?2")?;
+            let mut rows = statement.query(params![device, day])?;
+            match rows.next()? {
+                Some(row) => Ok(TrialRow { used: row.get(0)?, active_since: row.get(1)?, last_tick: row.get(2)? }),
+                None => Ok(TrialRow::default()),
+            }
+        })
+    }
+
+    pub fn trial_save(&self, device: &str, day: &str, row: &TrialRow, ip: &str) -> rusqlite::Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO trial_usage (device_id, day, used, active_since, last_tick, ip) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(device_id, day) DO UPDATE SET used = excluded.used, active_since = excluded.active_since, last_tick = excluded.last_tick",
+                params![device, day, row.used, row.active_since, row.last_tick, ip],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn trial_devices_on_ip(&self, ip: &str, day: &str) -> rusqlite::Result<i64> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT COUNT(DISTINCT device_id) FROM trial_usage WHERE ip = ?1 AND day = ?2",
+                params![ip, day],
+                |row| row.get(0),
+            )
+        })
+    }
+
+    pub fn trial_known(&self, device: &str, day: &str) -> rusqlite::Result<bool> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM trial_usage WHERE device_id = ?1 AND day = ?2",
+                params![device, day],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|count| count > 0)
         })
     }
 }

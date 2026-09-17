@@ -5,7 +5,9 @@
 
 mod gate;
 mod keys;
+mod ota;
 mod store;
+mod trial;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -28,7 +30,7 @@ use store::{now, Release, Store};
 /// every paying customer's app off.
 const TOKEN_DAYS: i64 = 14;
 
-struct Context {
+pub struct Context {
     store: Store,
     keys: Keys,
     admin_token: String,
@@ -36,9 +38,11 @@ struct Context {
     /// is not shipped inside the app, so a copy with the licence check torn
     /// out still cannot simulate anything.
     ddi_dir: std::path::PathBuf,
+    /// Over-the-air install, when the environment has it set up.
+    ota: Option<ota::OtaConfig>,
 }
 
-type Shared = Arc<Context>;
+pub type Shared = Arc<Context>;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -77,7 +81,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let context: Shared = Arc::new(Context { store, keys, admin_token, ddi_dir });
+    let ota = ota::OtaConfig::from_env();
+    match &ota {
+        Some(cfg) => println!("Over-the-air install is on at {}/get", cfg.base_url),
+        None => println!("Over-the-air install is off (set CLOAK_OTA_BASE_URL and CLOAK_IPA to enable)"),
+    }
+
+    let context: Shared = Arc::new(Context { store, keys, admin_token, ddi_dir, ota });
 
     let app = Router::new()
         .route("/v1/health", get(health))
@@ -87,9 +97,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/v1/deactivate", post(deactivate))
         .route("/v1/update", get(update))
         .route("/v1/ddi/{name}", get(developer_image))
+        .route("/v1/trial/status", post(trial::status))
+        .route("/v1/trial/start", post(trial::start))
+        .route("/v1/trial/tick", post(trial::tick))
+        .route("/v1/trial/stop", post(trial::stop))
         .route("/v1/admin/licenses", get(list_licenses).post(create_license))
         .route("/v1/admin/revoke", post(revoke))
         .route("/v1/admin/release", post(publish_release))
+        .route("/get", get(ota::landing))
+        .route("/enroll", get(ota::enroll))
+        .route("/enrolled", post(ota::enrolled))
+        .route("/install/{udid}", get(ota::install_page))
+        .route("/status/{udid}", get(ota::status))
+        .route("/manifest/{name}", get(ota::manifest))
+        .route("/ipa/{name}", get(ota::ipa))
         .layer(CorsLayer::permissive())
         .with_state(context);
 
@@ -128,6 +149,17 @@ struct TokenBody {
     token: String,
     plan: String,
     expires_at: i64,
+}
+
+#[derive(Serialize)]
+pub struct OwnedClaims {
+    pub lic: String,
+    pub dev: String,
+    pub plan: String,
+    pub exp: i64,
+    pub iat: i64,
+    pub rem: i64,
+    pub run: bool,
 }
 
 #[derive(Serialize)]
@@ -486,16 +518,16 @@ fn normalise(key: &str) -> String {
     key.trim().to_uppercase().replace(' ', "")
 }
 
-struct Problem {
+pub struct Problem {
     status: StatusCode,
     message: String,
 }
 
 impl Problem {
-    fn bad(message: impl Into<String>) -> Self {
+    pub fn bad(message: impl Into<String>) -> Self {
         Self { status: StatusCode::BAD_REQUEST, message: message.into() }
     }
-    fn not_found(message: impl Into<String>) -> Self {
+    pub fn not_found(message: impl Into<String>) -> Self {
         Self { status: StatusCode::NOT_FOUND, message: message.into() }
     }
     fn forbidden(message: impl Into<String>) -> Self {

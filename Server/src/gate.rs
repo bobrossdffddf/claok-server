@@ -61,6 +61,10 @@ pub fn check(keys: &Keys, store: &Store, token: &str) -> Result<Claims, Refusal>
         return Err(Refusal::Expired);
     }
 
+    if claims.plan == "trial" {
+        return if claims.lic == format!("trial:{}", claims.dev) { Ok(claims) } else { Err(Refusal::Malformed) };
+    }
+
     // The signature only proves we issued it. Whether it still counts is a
     // question for the database, which is the whole reason to check again
     // here rather than trusting what the phone already decided.
